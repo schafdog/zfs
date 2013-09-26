@@ -66,6 +66,8 @@
 struct zfs_mount_args {
     const char      *fspec;         /* block special device to mount */
     uint64_t     flags;
+    char*	optptr;
+    int         optlen;
 };
 
 

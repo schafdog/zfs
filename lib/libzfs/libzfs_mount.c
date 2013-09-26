@@ -454,6 +454,7 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 
 	if (options == NULL) {
 		(void) strlcpy(mntopts, MNTOPT_DEFAULTS, sizeof (mntopts));
+		mntopts[0] = '\0';
 	} else {
 		(void) strlcpy(mntopts, options, sizeof (mntopts));
 	}
@@ -473,7 +474,7 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 		flags |= MNT_RDONLY;
 #endif
 
-
+#if LINUX
 	/*
 	 * Append default mount options which apply to the mount point.
 	 * This is done because under Linux (unlike Solaris) multiple mount
@@ -489,6 +490,7 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 		    dgettext(TEXT_DOMAIN, "cannot mount '%s'"),
 		    mountpoint));
 	}
+#endif
 
 	/*
 	 * Append zfsutil option so the mount helper allow the mount
@@ -539,12 +541,17 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 #if LINUX
 	rc = do_mount(zfs_get_name(zhp), mountpoint, mntopts);
 #else
-    //printf("zfs_mount: un used options: \"%s\"\n", mntopts);
-    //fprintf(stderr, "zfs_mount: flags are %04x \n", flags);
-    mnt_args.fspec = zfs_get_name(zhp);
-    mnt_args.flags = flags;
-    rc = mount(MNTTYPE_ZFS, mountpoint, flags, &mnt_args);
+	//printf("zfs_mount: un used options: \"%s\"\n", mntopts);
+	//fprintf(stderr, "zfs_mount: flags are %04x \n", flags);
+	mnt_args.fspec = zfs_get_name(zhp);
+	mnt_args.flags = flags;
+	mnt_args.optptr = mntopts;
+	mnt_args.optlen = sizeof(mntopts);
+	printf("before mount: mntopts p %p mntopts %s\n", mntopts, mntopts);
+	rc = mount(MNTTYPE_ZFS, mountpoint, flags, &mnt_args);
+	printf("after mount: mntopts p %p mntopts %s\n", mntopts, mntopts);
 #endif
+    
 
 	if (rc) {
 		/*

@@ -51,8 +51,8 @@
 #define	MNTOPT_DEFCONTEXT "defcontext"	/* selinux defcontext */
 #define	MNTOPT_ROOTCONTEXT "rootcontext" /* selinux rootcontext */
 #define	MNTOPT_DEFAULTS	"defaults"	/* defaults */
-#define	MNTOPT_DEVICES	"dev"		/* device-special allowed */
-#define	MNTOPT_NODEVICES "nodev"	/* device-special disallowed */
+#define	MNTOPT_DEVICES	"devices"		/* device-special allowed */
+#define	MNTOPT_NODEVICES "nodevices"	/* device-special disallowed */
 #define	MNTOPT_DIRATIME	"diratime"	/* update atime for dirs */
 #define	MNTOPT_NODIRATIME "nodiratime"	/* do not update atime for dirs */
 #define	MNTOPT_DIRSYNC	"dirsync"	/* do dir updates synchronously */

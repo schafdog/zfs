@@ -31,7 +31,8 @@ CFLAGS_KMOD = \
 	-DZFS_META_RELEASE=\"@ZFS_META_RELEASE@\" \
 	-I$(top_srcdir)/include \
 	-I@SPL_OBJ@ -I@SPL_OBJ@/include \
-	-I@KERNELSRC@
+	-I@KERNELSRC@ \
+	-I$(top_srcdir)/lib/libspl/include
 
 LINKFLAGS_KMOD = \
 	-Xlinker \
