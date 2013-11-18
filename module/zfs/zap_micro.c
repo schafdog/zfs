@@ -140,7 +140,7 @@ zap_normalize(zap_t *zap, const char *name, char *namenorm)
 	err = 0;
 	(void) u8_textprep_str((char *)name, &inlen, namenorm, &outlen,
 	    zap->zap_normflags | U8_TEXTPREP_IGNORE_NULL |
-	    U8_TEXTPREP_IGNORE_INVALID, U8_UNICODE_LATEST, &err);
+	    U8_TEXTPREP_IGNORE_INVALID | U8_TEXTPREP_NFKD, U8_UNICODE_LATEST, &err);
 
 	return (err);
 }
@@ -179,21 +179,21 @@ zap_name_alloc(zap_t *zap, const char *key, matchtype_t mt)
 	zn->zn_key_orig = key;
 	zn->zn_key_orig_numints = strlen(zn->zn_key_orig) + 1;
 	zn->zn_matchtype = mt;
-	if (zap->zap_normflags) {
+//	if (zap->zap_normflags) {
 		if (zap_normalize(zap, key, zn->zn_normbuf) != 0) {
 			zap_name_free(zn);
 			return (NULL);
 		}
 		zn->zn_key_norm = zn->zn_normbuf;
 		zn->zn_key_norm_numints = strlen(zn->zn_key_norm) + 1;
-	} else {
-		if (mt != MT_EXACT) {
-			zap_name_free(zn);
-			return (NULL);
-		}
-		zn->zn_key_norm = zn->zn_key_orig;
-		zn->zn_key_norm_numints = zn->zn_key_orig_numints;
-	}
+//	} else {
+//		if (mt != MT_EXACT) {
+//			zap_name_free(zn);
+//			return (NULL);
+//		}
+//		zn->zn_key_norm = zn->zn_key_orig;
+//		zn->zn_key_norm_numints = zn->zn_key_orig_numints;
+//	}
 
 	zn->zn_hash = zap_hash(zn);
 	return (zn);

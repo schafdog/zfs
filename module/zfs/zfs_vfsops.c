@@ -3170,6 +3170,10 @@ zfs_get_zplprop(objset_t *os, zfs_prop_t prop, uint64_t *value)
 	if (os != NULL)
 		error = zap_lookup(os, MASTER_NODE_OBJ, pname, 8, 1, value);
 
+	if (prop == ZFS_PROP_NORMALIZE) {
+		*value |= U8_TEXTPREP_NFKD;
+		error = 0;
+	}
 	if (error == ENOENT) {
 		/* No value set, use the default value */
 		switch (prop) {
