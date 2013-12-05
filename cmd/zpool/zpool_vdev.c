@@ -156,6 +156,13 @@ static const int vdev_disk_database_size =
 #define	INQ_REPLY_LEN	96
 #define	INQ_CMD_LEN	6
 
+#ifdef __APPLE__
+static const char *DISKUTIL_PATH = "/usr/sbin/diskutil";
+static const char *CORESTORAGE = "coreStorage";
+static const char *CORESTORAGEVERB_INFO = "info";
+static boolean_t is_core_storage(const char *);
+#endif
+
 #ifdef __LINUX__
 static boolean_t
 check_sector_size_database(char *path, int *sector_size)
@@ -313,6 +320,22 @@ check_file(const char *file, boolean_t force, boolean_t isspare)
 
 		free(name);
 	}
+
+#ifdef __APPLE__
+	if (!ret) {
+		int bsdmaj = -1, bsdmin = -1;
+		sscanf(file, "/dev/disk%ds%d",
+                          &bsdmaj,
+                          &bsdmin);
+		if (bsdmaj != -1 && bsdmin !=-1) {
+			if (is_core_storage(file)) {
+				(void) fprintf(stderr, gettext("error: this partition "
+				    "is being used by Core Storage\n"));
+				ret = -1;
+			}
+		}
+	}
+#endif
 
 	(void) close(fd);
 	return (ret);
@@ -484,6 +507,63 @@ check_device(const char *path, boolean_t force,
 	return check_disk(path, cache, force, isspare, iswholedisk);
 }
 
+#ifdef __APPLE__
+static boolean_t
+is_core_storage(const char *path)
+{
+        int ret = B_TRUE;
+        union wait status;
+        int s_out = dup(1);
+        int s_err = dup(2);
+
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull == -1) {
+                perror("is_core_storage: opening /dev/null");
+                exit(2);
+        }
+
+        dup2(devnull, 1);
+        dup2(devnull, 2);
+
+        pid_t pid = fork();
+        if (pid == -1) {
+                perror("is_core_storage: fork\n");
+                exit(2);
+        }
+
+        if (pid == 0) {
+                close(devnull);
+                close(s_out);
+                close(s_err);
+
+                char *const diskutilargv[] = { (char *)DISKUTIL_PATH,
+                    (char *)CORESTORAGE,
+                    (char *)CORESTORAGEVERB_INFO,
+                    (char *)path,
+                    (char *)0 };
+
+                if (execv(DISKUTIL_PATH, diskutilargv) < 0) {
+                        perror("is_core_storage: exec diskutil");
+                }
+                _exit(2);
+        }
+
+        dup2(s_out, 1);
+        dup2(s_err, 2);
+
+        close(devnull);
+        close(s_out);
+        close(s_err);
+
+        (void) wait4(pid, (int *)&status, 0, NULL);
+
+        if (status.w_retcode != 0) {
+                ret = B_FALSE;
+        }
+        return ret;
+}
+#endif
+
 /*
  * By "whole disk" we mean an entire physical disk (something we can
  * label, toggle the write cache on, etc.) as opposed to the full
@@ -506,6 +586,10 @@ is_whole_disk(const char *path)
 	}
 	efi_free(label);
 	(void) close(fd);
+#ifdef __APPLE__
+	if (is_core_storage(path))
+		return B_FALSE;
+#endif
 	return (B_TRUE);
 }
 
