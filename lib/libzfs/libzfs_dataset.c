@@ -598,11 +598,18 @@ zfs_open(libzfs_handle_t *hdl, const char *path, int types)
 void
 zfs_close(zfs_handle_t *zhp)
 {
+    fprintf(stderr, "zfs_close(%p): zfs_props %p\r\n", zhp, zhp->zfs_props);
 	if (zhp->zfs_mntopts)
 		free(zhp->zfs_mntopts);
-	nvlist_free(zhp->zfs_props);
-	nvlist_free(zhp->zfs_user_props);
-	nvlist_free(zhp->zfs_recvd_props);
+    if (zhp->zfs_props)
+        nvlist_free(zhp->zfs_props);
+	if (zhp->zfs_user_props)
+        nvlist_free(zhp->zfs_user_props);
+    if (zhp->zfs_recvd_props)
+        nvlist_free(zhp->zfs_recvd_props);
+
+    zhp->zfs_props = zhp->zfs_user_props = zhp->zfs_recvd_props = NULL;
+
 	free(zhp);
 }
 
