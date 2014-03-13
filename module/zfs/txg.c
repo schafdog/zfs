@@ -33,7 +33,7 @@
 #include <sys/dsl_scan.h>
 #include <sys/callb.h>
 
-//#define dprintf printf
+#define dprintf printf
 
 /*
  * ZFS Transaction Groups

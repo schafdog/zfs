@@ -222,7 +222,8 @@ vdev_disk_io_intr(struct buf *bp, void *arg)
 	if (zio->io_error == 0 && buf_resid(bp) != 0) {
 		zio->io_error = EIO;
 	}
-	buf_free(bp);
+	//buf_free(bp);
+    buf_brelse(bp);
 	//zio_next_stage_async(zio);
     zio_interrupt(zio);
 }
@@ -237,6 +238,7 @@ vdev_disk_ioctl_done(void *zio_arg, int error)
 	//zio_next_stage_async(zio);
     zio_interrupt(zio);
 }
+
 
 static int
 vdev_disk_io_start(zio_t *zio)
@@ -363,6 +365,12 @@ vdev_disk_io_start(zio_t *zio)
 	}
 	error = VNOP_STRATEGY(bp);
 	ASSERT(error == 0);
+
+    if (error) {
+        printf("VNOP_STRATEGY returned %d\n", error);
+        zio->io_error = ENXIO;
+        return (ZIO_PIPELINE_CONTINUE);
+    }
 
     return (ZIO_PIPELINE_STOP);
 }
