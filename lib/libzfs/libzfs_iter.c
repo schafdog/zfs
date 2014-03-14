@@ -132,6 +132,12 @@ zfs_iter_filesystems(zfs_handle_t *zhp, zfs_iter_f func, void *data)
 			return (ret);
 		}
 
+    printf("zfs_iter_filesystems zhp %p : zhp->zfs_props %p : "
+        "zhp->zfs_user_props %p :\n"
+        "    resetting zc.zc_nvlist_dst_size from %llu to "
+        "allocated_size %llu\n", zhp, zhp->zfs_props, zhp->zfs_user_props,
+        zc.zc_nvlist_dst_size, allocated_size);
+
         zc.zc_nvlist_dst_size = allocated_size;
 
 	}
@@ -149,6 +155,7 @@ zfs_iter_snapshots(zfs_handle_t *zhp, boolean_t simple, zfs_iter_f func,
 	zfs_cmd_t zc = {"\0"};
 	zfs_handle_t *nzhp;
 	int ret;
+    uint64_t allocated_size;
 
 	if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT)
 		return (0);
@@ -157,6 +164,9 @@ zfs_iter_snapshots(zfs_handle_t *zhp, boolean_t simple, zfs_iter_f func,
 
 	if (zcmd_alloc_dst_nvlist(zhp->zfs_hdl, &zc, 0) != 0)
 		return (-1);
+
+    allocated_size = zc.zc_nvlist_dst_size;
+
 	while ((ret = zfs_do_list_ioctl(zhp, ZFS_IOC_SNAPSHOT_LIST_NEXT,
 	    &zc)) == 0) {
 
@@ -171,6 +181,15 @@ zfs_iter_snapshots(zfs_handle_t *zhp, boolean_t simple, zfs_iter_f func,
 			zcmd_free_nvlists(&zc);
 			return (ret);
 		}
+
+    printf("zfs_iter_snapshots zhp %p : zhp->zfs_props %p : "
+        "zhp->zfs_user_props %p :\n"
+        "    resetting zc.zc_nvlist_dst_size from %llu to "
+        "allocated_size %llu\n", zhp, zhp->zfs_props, zhp->zfs_user_props,
+        zc.zc_nvlist_dst_size, allocated_size);
+
+        zc.zc_nvlist_dst_size = allocated_size;
+
 	}
 	zcmd_free_nvlists(&zc);
 	return ((ret < 0) ? ret : 0);
