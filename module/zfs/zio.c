@@ -1395,12 +1395,13 @@ __zio_execute(zio_t *zio)
  * Initiate I/O, either sync or async
  * ==========================================================================
  */
-#if 0
+#if 1
 int
 zio_wait(zio_t *zio)
 {
 	int error;
     int booga;
+    uint64_t timeout;
 
 	ASSERT(zio->io_stage == ZIO_STAGE_OPEN);
 	ASSERT(zio->io_executor == NULL);
@@ -1422,18 +1423,17 @@ zio_wait(zio_t *zio)
 		    ddi_get_lbolt() + hz);
 
 #if _KERNEL
-        if (booga++ > 10) {
+        if (booga++ > 30) {
             int i,j;
-            printf("Bastard hack\n");
+            printf("HUNG IO detected:\n");
             for (i = 0; i < ZIO_TYPES; i++) {
                 for (j = 0; j < ZIO_TASKQ_TYPES; j++) {
-                    taskq_t *tq = zio->io_spa->spa_zio_taskq[i][j];
+                    taskq_t *tq = &zio->io_spa->spa_zio_taskq[i][j];
                     if (!tq) continue;
-                    printf("tq[%d][%d] %p '%s' threads %d\n",
+                    printf("tq[%d][%d] %p '%s' nthr %d\n",
                            i,j,tq,tq->tq_name, tq->tq_nthreads);
                 }
             }
-            panic("time to die");
             break;
         }
 #endif
@@ -1453,7 +1453,7 @@ zio_wait(zio_t *zio)
 	return (error);
 }
 #endif
-#if 1
+#if 0
 int
 zio_wait(zio_t *zio)
 {

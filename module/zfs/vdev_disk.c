@@ -310,6 +310,7 @@ vdev_disk_io_start(zio_t *zio)
         return (ZIO_PIPELINE_CONTINUE);
 	}
 
+#if 0  // NOT IN UPSTREAM
 	if (zio->io_type == ZIO_TYPE_READ && vdev_cache_read(zio) == 0)
         return (ZIO_PIPELINE_STOP);
     //		return;
@@ -317,9 +318,9 @@ vdev_disk_io_start(zio_t *zio)
 	if ((zio = vdev_queue_io(zio)) == NULL)
         return (ZIO_PIPELINE_CONTINUE);
     //		return;
+#endif
 
-	flags = (zio->io_type == ZIO_TYPE_READ ? B_READ : B_WRITE);
-	//flags |= B_NOCACHE;
+	flags = B_NOCACHE | (zio->io_type == ZIO_TYPE_READ ? B_READ : B_WRITE);
 
 	if (zio->io_flags & ZIO_FLAG_FAILFAST)
 		flags |= B_FAILFAST;
@@ -330,6 +331,7 @@ vdev_disk_io_start(zio_t *zio)
 	 * dvd will be NULL and buf_alloc below will fail
 	 */
 	//error = vdev_is_dead(vd) ? ENXIO : vdev_error_inject(vd, zio);
+#if 0  // NOT IN UPSTREAM
 	if (vdev_is_dead(vd)) {
         error = ENXIO;
     }
@@ -339,6 +341,7 @@ vdev_disk_io_start(zio_t *zio)
 		//zio_next_stage_async(zio);
 		return (ZIO_PIPELINE_CONTINUE);
 	}
+#endif
 
 	bp = buf_alloc(dvd->vd_devvp);
 
@@ -363,14 +366,8 @@ vdev_disk_io_start(zio_t *zio)
 	if (zio->io_type == ZIO_TYPE_WRITE) {
 		vnode_startwrite(dvd->vd_devvp);
 	}
-	error = VNOP_STRATEGY(bp);
-	ASSERT(error == 0);
 
-    if (error) {
-        printf("VNOP_STRATEGY returned %d\n", error);
-        zio->io_error = ENXIO;
-        return (ZIO_PIPELINE_CONTINUE);
-    }
+    VERIFY( VNOP_STRATEGY(bp) == 0 );
 
     return (ZIO_PIPELINE_STOP);
 }
