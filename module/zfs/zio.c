@@ -1426,15 +1426,19 @@ zio_wait(zio_t *zio)
         if (booga++ > 30) {
             int i,j;
             printf("HUNG IO detected:\n");
+#if 0
             for (i = 0; i < ZIO_TYPES; i++) {
                 for (j = 0; j < ZIO_TASKQ_TYPES; j++) {
-                    taskq_t *tq = &zio->io_spa->spa_zio_taskq[i][j];
+                    spa_taskqs_t *sq = &zio->io_spa->spa_zio_taskq[i][j];
+                    if (!sq) continue;
+                    taskq_t *tq = *sq->stqs_taskq;
                     if (!tq) continue;
-                    printf("tq[%d][%d] %p '%s' nthr %d\n",
-                           i,j,tq,tq->tq_name, tq->tq_nthreads);
+                    printf("sq[%d][%d] %p count %u: '%s' nthr %d\n",
+                           i,j,sq,sq->stqs_count,
+                           tq->tq_name, tq->tq_nthreads);
                 }
             }
-            break;
+#endif
         }
 #endif
 
