@@ -78,4 +78,6 @@ extern void statfs2mnttab(struct statfs *sfs, struct mnttab *mp);
 #define	AT_SYMLINK_FOLLOW	0x400
 extern int fstatat64(int, const char *, struct stat *, int);
 
+extern int mkdirat64(int, const char *, mode_t);
+
 #endif

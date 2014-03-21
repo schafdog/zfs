@@ -221,6 +221,20 @@ openat64(int dirfd, const char *path, int flags, ...)
 }
 
 int
+mkdirat64(int dirfd, const char *path, mode_t mode)
+{
+	int cwdfd, newdirfd;
+
+	if ((cwdfd = chdir_block_begin(dirfd)) == -1)
+		return (-1);
+
+	newdirfd = mkdir(path, mode);
+
+	chdir_block_end(cwdfd);
+	return (newdirfd);
+}
+
+int
 fstatat64(int dirfd, const char *path, struct stat *statbuf, int flag)
 {
 	int cwdfd, error;
