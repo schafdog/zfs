@@ -20,8 +20,10 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
@@ -37,6 +39,7 @@
 #include <sys/zio.h>
 #include <sys/zil.h>
 #include <sys/sa.h>
+#include <sys/zfs_ioctl.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -56,62 +59,108 @@ struct dmu_tx;
 
 #define	OBJSET_FLAG_USERACCOUNTING_COMPLETE	(1ULL<<0)
 
+/* all flags are currently non-portable */
+#define	OBJSET_CRYPT_PORTABLE_FLAGS_MASK	(0)
+
 typedef struct objset_phys {
 	dnode_phys_t os_meta_dnode;
 	zil_header_t os_zil_header;
 	uint64_t os_type;
 	uint64_t os_flags;
+	uint8_t os_portable_mac[ZIO_OBJSET_MAC_LEN];
+	uint8_t os_local_mac[ZIO_OBJSET_MAC_LEN];
 	char os_pad[OBJSET_PHYS_SIZE - sizeof (dnode_phys_t)*3 -
-	    sizeof (zil_header_t) - sizeof (uint64_t)*2];
+	    sizeof (zil_header_t) - sizeof (uint64_t)*2 -
+	    2*ZIO_OBJSET_MAC_LEN];
 	dnode_phys_t os_userused_dnode;
 	dnode_phys_t os_groupused_dnode;
 } objset_phys_t;
 
+#define	OBJSET_PROP_UNINITIALIZED	((uint64_t)-1)
 struct objset {
 	/* Immutable: */
 	struct dsl_dataset *os_dsl_dataset;
 	spa_t *os_spa;
 	arc_buf_t *os_phys_buf;
 	objset_phys_t *os_phys;
+	boolean_t os_encrypted;
+
 	/*
-	 * The following "special" dnodes have no parent and are exempt from
-	 * dnode_move(), but they root their descendents in this objset using
-	 * handles anyway, so that all access to dnodes from dbufs consistently
-	 * uses handles.
+	 * The following "special" dnodes have no parent, are exempt
+	 * from dnode_move(), and are not recorded in os_dnodes, but they
+	 * root their descendents in this objset using handles anyway, so
+	 * that all access to dnodes from dbufs consistently uses handles.
 	 */
 	dnode_handle_t os_meta_dnode;
 	dnode_handle_t os_userused_dnode;
 	dnode_handle_t os_groupused_dnode;
 	zilog_t *os_zil;
 
+	list_node_t os_evicting_node;
+
 	/* can change, under dsl_dir's locks: */
-	uint8_t os_checksum;
-	uint8_t os_compress;
+	uint64_t os_dnodesize; /* default dnode size for new objects */
+	enum zio_checksum os_checksum;
+	enum zio_compress os_compress;
 	uint8_t os_copies;
-	uint8_t os_dedup_checksum;
-	uint8_t os_dedup_verify;
-	uint8_t os_logbias;
-	uint8_t os_primary_cache;
-	uint8_t os_secondary_cache;
-	uint8_t os_sync;
+	enum zio_checksum os_dedup_checksum;
+	boolean_t os_dedup_verify;
+	zfs_logbias_op_t os_logbias;
+	zfs_cache_type_t os_primary_cache;
+	zfs_cache_type_t os_secondary_cache;
+	zfs_sync_type_t os_sync;
+	zfs_redundant_metadata_type_t os_redundant_metadata;
+	int os_recordsize;
+	/*
+	 * The next four values are used as a cache of whatever's on disk, and
+	 * are initialized the first time these properties are queried. Before
+	 * being initialized with their real values, their values are
+	 * OBJSET_PROP_UNINITIALIZED.
+	 */
+	uint64_t os_version;
+	uint64_t os_normalization;
+	uint64_t os_utf8only;
+	uint64_t os_casesensitivity;
+	/*
+	 * The largest zpl file block allowed in special class.
+	 * cached here instead of zfsvfs for easier access.
+	 */
+	int os_zpl_special_smallblock;
+
+	/*
+	 * Pointer is constant; the blkptr it points to is protected by
+	 * os_dsl_dataset->ds_bp_rwlock
+	 */
+	blkptr_t *os_rootbp;
 
 	/* no lock needed: */
 	struct dmu_tx *os_synctx; /* XXX sketchy */
-	blkptr_t *os_rootbp;
 	zil_header_t os_zil_header;
-	list_t os_synced_dnodes;
+	multilist_t *os_synced_dnodes;
 	uint64_t os_flags;
+	uint64_t os_freed_dnodes;
+	boolean_t os_rescan_dnodes;
+	boolean_t os_raw_receive;
+
+	/* os_phys_buf should be written raw next txg */
+	boolean_t os_next_write_raw[TXG_SIZE];
 
 	/* Protected by os_obj_lock */
 	kmutex_t os_obj_lock;
-	uint64_t os_obj_next;
+	uint64_t os_obj_next_chunk;
+
+	/* Per-CPU next object to allocate, protected by atomic ops. */
+	uint64_t *os_obj_next_percpu;
+	int os_obj_next_percpu_len;
 
 	/* Protected by os_lock */
 	kmutex_t os_lock;
-	list_t os_dirty_dnodes[TXG_SIZE];
-	list_t os_free_dnodes[TXG_SIZE];
+	multilist_t *os_dirty_dnodes[TXG_SIZE];
 	list_t os_dnodes;
 	list_t os_downgraded_dbufs;
+
+	/* Protects changes to DMU_{USER,GROUP}USED_OBJECT */
+	kmutex_t os_userused_lock;
 
 	/* stuff we store for the user */
 	kmutex_t os_user_ptr_lock;
@@ -134,11 +183,18 @@ struct objset {
 
 /* called from zpl */
 int dmu_objset_hold(const char *name, void *tag, objset_t **osp);
+int dmu_objset_hold_flags(const char *name, boolean_t decrypt, void *tag,
+    objset_t **osp);
 int dmu_objset_own(const char *name, dmu_objset_type_t type,
-    boolean_t readonly, void *tag, objset_t **osp);
-void dmu_objset_refresh_ownership(objset_t *os, void *tag);
+    boolean_t readonly, boolean_t decrypt, void *tag, objset_t **osp);
+int dmu_objset_own_obj(struct dsl_pool *dp, uint64_t obj,
+    dmu_objset_type_t type, boolean_t readonly, boolean_t decrypt,
+    void *tag, objset_t **osp);
+void dmu_objset_refresh_ownership(struct dsl_dataset *ds,
+    struct dsl_dataset **newds, boolean_t key_needed, void *tag);
 void dmu_objset_rele(objset_t *os, void *tag);
-void dmu_objset_disown(objset_t *os, void *tag);
+void dmu_objset_rele_flags(objset_t *os, boolean_t decrypt, void *tag);
+void dmu_objset_disown(objset_t *os, boolean_t decrypt, void *tag);
 int dmu_objset_from_ds(struct dsl_dataset *ds, objset_t **osp);
 
 void dmu_objset_stats(objset_t *os, nvlist_t *nv);
@@ -155,6 +211,9 @@ timestruc_t dmu_objset_snap_cmtime(objset_t *os);
 /* called from dsl */
 void dmu_objset_sync(objset_t *os, zio_t *zio, dmu_tx_t *tx);
 boolean_t dmu_objset_is_dirty(objset_t *os, uint64_t txg);
+objset_t *dmu_objset_create_impl_dnstats(spa_t *spa, struct dsl_dataset *ds,
+    blkptr_t *bp, dmu_objset_type_t type, int levels, int blksz, int ibs,
+    dmu_tx_t *tx);
 objset_t *dmu_objset_create_impl(spa_t *spa, struct dsl_dataset *ds,
     blkptr_t *bp, dmu_objset_type_t type, dmu_tx_t *tx);
 int dmu_objset_open_impl(spa_t *spa, struct dsl_dataset *ds, blkptr_t *bp,
@@ -165,7 +224,11 @@ void dmu_objset_userquota_get_ids(dnode_t *dn, boolean_t before, dmu_tx_t *tx);
 boolean_t dmu_objset_userused_enabled(objset_t *os);
 int dmu_objset_userspace_upgrade(objset_t *os);
 boolean_t dmu_objset_userspace_present(objset_t *os);
+boolean_t dmu_objset_incompatible_encryption_version(objset_t *os);
 int dmu_fsname(const char *snapname, char *buf);
+
+void dmu_objset_evict_done(objset_t *os);
+void dmu_objset_willuse_space(objset_t *os, int64_t space, dmu_tx_t *tx);
 
 void dmu_objset_init(void);
 void dmu_objset_fini(void);

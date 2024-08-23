@@ -22,6 +22,7 @@
 .deps
 .dirstamp
 .libs
+.dirstamp
 .DS_Store
 modules.order
 Makefile
@@ -54,3 +55,4 @@ cscope.*
 *.rpm
 *.deb
 *.tar.gz
+bertin.mode1v3

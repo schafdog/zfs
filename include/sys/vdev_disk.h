@@ -28,20 +28,39 @@
 #ifndef _SYS_VDEV_DISK_H
 #define	_SYS_VDEV_DISK_H
 
-#ifdef _KERNEL
 #include <sys/vdev.h>
+#ifdef _KERNEL
+#include <sys/ldi_osx.h>
+#endif
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
+#ifdef _KERNEL
 typedef struct vdev_disk {
-    char            *vd_minor;
-    struct vnode    *vd_devvp;
-    uint64_t	vd_ashift;
+#ifdef illumos
+	ddi_devid_t	vd_devid;
+	char		*vd_minor;
+#endif
+	ldi_handle_t	vd_lh;
+	list_t		vd_ldi_cbs;
+	boolean_t	vd_ldi_offline;
 } vdev_disk_t;
-
-#define lbtodb(bytes)                   /* calculates (bytes / DEV_BSIZE) */ \
-        ((unsigned long long)(bytes) >> DEV_BSHIFT)
-#define ldbtob(db)                      /* calculates (db * DEV_BSIZE) */ \
-        ((unsigned long long)(db) << DEV_BSHIFT)
-
-
 #endif /* _KERNEL */
+
+extern int vdev_disk_physio(vdev_t *,
+    caddr_t, size_t, uint64_t, int, boolean_t);
+
+/*
+ * Since vdev_disk.c is not compiled into libzpool, this function should only be
+ * defined in the zfs kernel module.
+ */
+#ifdef _KERNEL
+extern int vdev_disk_ldi_physio(ldi_handle_t, caddr_t, size_t, uint64_t, int);
+#endif
+#ifdef  __cplusplus
+}
+#endif
+
 #endif /* _SYS_VDEV_DISK_H */

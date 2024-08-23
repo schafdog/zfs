@@ -140,6 +140,7 @@ zprop_register_hidden(int prop, const char *name, zprop_type_t type,
 /*
  * A comparison function we can use to order indexes into property tables.
  */
+#ifndef _KERNEL
 static int
 zprop_compare(const void *arg1, const void *arg2)
 {
@@ -150,11 +151,12 @@ zprop_compare(const void *arg1, const void *arg2)
 	p1ro = (p1->pd_attr == PROP_READONLY);
 	p2ro = (p2->pd_attr == PROP_READONLY);
 
-	if (p1ro == p2ro)
+	if (p1ro == p2ro && p1->pd_name && p2->pd_name)
 		return (strcmp(p1->pd_name, p2->pd_name));
 
 	return (p1ro ? -1 : 1);
 }
+#endif
 
 /*
  * Iterate over all properties in the given property table, calling back
@@ -175,7 +177,7 @@ zprop_iter_common(zprop_func func, void *cb, boolean_t show_all,
 	size = num_props * sizeof (zprop_desc_t *);
 
 #if defined(_KERNEL)
-	order = kmem_alloc(size, KM_PUSHPAGE);
+	order = kmem_alloc(size, KM_SLEEP);
 #else
 	if ((order = malloc(size)) == NULL)
 		return (ZPROP_CONT);
@@ -353,9 +355,13 @@ zprop_values(int prop, zfs_type_t type)
 
 /*
  * Returns TRUE if the property applies to any of the given dataset types.
+ *
+ * If headcheck is set, the check is being made against the head dataset
+ * type of a snapshot which requires to return B_TRUE when the property
+ * is only valid for snapshots.
  */
 boolean_t
-zprop_valid_for_type(int prop, zfs_type_t type)
+zprop_valid_for_type(int prop, zfs_type_t type, boolean_t headcheck)
 {
 	zprop_desc_t *prop_tbl;
 
@@ -364,6 +370,8 @@ zprop_valid_for_type(int prop, zfs_type_t type)
 
 	ASSERT(prop < zprop_get_numprops(type));
 	prop_tbl = zprop_get_proptable(type);
+	if (headcheck && prop_tbl[prop].pd_types == ZFS_TYPE_SNAPSHOT)
+		return (B_TRUE);
 	return ((prop_tbl[prop].pd_types & type) != 0);
 }
 

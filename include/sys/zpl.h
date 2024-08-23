@@ -25,7 +25,9 @@
 #ifndef	_SYS_ZPL_H
 #define	_SYS_ZPL_H
 
+#include <sys/mntent.h>
 #include <sys/vfs.h>
+
 //#include <linux/vfs_compat.h>
 //#include <linux/xattr_compat.h>
 //#include <linux/exportfs.h>
@@ -47,12 +49,16 @@ extern const struct inode_operations zpl_special_inode_operations;
 //extern dentry_operations_t zpl_dentry_operations;
 
 /* zpl_file.c */
-extern ssize_t zpl_read_common(struct vnode *ip, const char *buf,
-    size_t len, loff_t pos, uio_seg_t segment, int flags, cred_t *cr);
-extern ssize_t zpl_write_common(struct vnode *ip, const char *buf,
-    size_t len, loff_t pos, uio_seg_t segment, int flags, cred_t *cr);
-extern long zpl_fallocate_common(struct vnode *ip, int mode,
+extern ssize_t zpl_read_common(struct inode *ip, const char *buf,
+    size_t len, loff_t *ppos, uio_seg_t segment, int flags,
+    cred_t *cr);
+extern ssize_t zpl_write_common(struct inode *ip, const char *buf,
+    size_t len, loff_t *ppos, uio_seg_t segment, int flags,
+    cred_t *cr);
+#if defined(HAVE_FILE_FALLOCATE) || defined(HAVE_INODE_FALLOCATE)
+extern long zpl_fallocate_common(struct inode *ip, int mode,
     loff_t offset, loff_t len);
+#endif /* defined(HAVE_FILE_FALLOCATE) || defined(HAVE_INODE_FALLOCATE) */
 
 extern const struct address_space_operations zpl_address_space_operations;
 extern const struct file_operations zpl_file_operations;
@@ -60,11 +66,7 @@ extern const struct file_operations zpl_dir_file_operations;
 
 /* zpl_super.c */
 extern void zpl_prune_sbs(int64_t bytes_to_scan, void *);
-
-typedef struct zpl_mount_data {
-	const char *z_osname;	/* Dataset name */
-	void *z_data;		/* Mount options string */
-} zpl_mount_data_t;
+extern void zpl_prune_sb(int64_t nr_to_scan, void *arg);
 
 extern const struct super_operations zpl_super_operations;
 extern const struct export_operations zpl_export_operations;

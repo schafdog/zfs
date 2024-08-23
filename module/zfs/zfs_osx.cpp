@@ -1,4 +1,28 @@
+/*
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+ * or http://www.opensolaris.org/os/licensing.
+ * See the License for the specific language governing permissions
+ * and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+/*
+ * Copyright (c) 2013-2017, Jorgen Lundman.  All rights reserved.
+ */
 
+#include <sys/types.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBSD.h>
 #include <IOKit/IOKitKeys.h>
@@ -9,6 +33,13 @@
 
 #include <sys/zvolIO.h>
 
+#ifdef ZFS_BOOT
+#include <sys/zfs_boot.h>
+#include <sys/spa_impl.h>
+#endif
+
+#include <sys/ldi_osx.h>
+
 #include <sys/zfs_vnops.h>
 #include <sys/taskq.h>
 
@@ -18,21 +49,15 @@
 
 
 extern "C" {
-  extern kern_return_t _start(kmod_info_t *ki, void *data);
-  extern kern_return_t _stop(kmod_info_t *ki, void *data);
+	extern kern_return_t _start(kmod_info_t *ki, void *data);
+	extern kern_return_t _stop(kmod_info_t *ki, void *data);
 
+	__attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(net.lundman.zfs, "1.0.0", _start, _stop)
+	kmod_start_func_t *_realmain = 0;
+	kmod_stop_func_t  *_antimain = 0;
+	int _kext_apple_cc = __APPLE_CC__ ;
+	extern uint64_t spl_initialised;
 };
-  __attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(net.lundman.zfs, "1.0.0", _start, _stop)
-  __private_extern__ kmod_start_func_t *_realmain = 0;
-  __private_extern__ kmod_stop_func_t  *_antimain = 0;
-  __private_extern__ int _kext_apple_cc = __APPLE_CC__ ;
-
-
-/*
- * Can those with more C++ experience clean this up?
- */
-static void *global_c_interface = NULL;
-
 
 // Define the superclass.
 #define super IOService
@@ -48,12 +73,21 @@ extern "C" {
 
 extern SInt32 zfs_active_fs_count;
 
-/* Global system task queue for common use */
-extern int system_taskq_size;
-taskq_t	*system_taskq = NULL;
 
+#ifdef DEBUG
+#define	ZFS_DEBUG_STR	" (DEBUG mode)"
+#else
+#define	ZFS_DEBUG_STR	""
+#endif
 
+static char kext_version[64] = ZFS_META_VERSION "-" ZFS_META_RELEASE ZFS_DEBUG_STR;
 
+//struct sysctl_oid_list sysctl__zfs_children;
+SYSCTL_DECL(_zfs);
+SYSCTL_NODE( , OID_AUTO, zfs, CTLFLAG_RD, 0, "");
+SYSCTL_STRING(_zfs, OID_AUTO, kext_version,
+			  CTLFLAG_RD | CTLFLAG_LOCKED,
+			  kext_version, 0, "ZFS KEXT Version");
 
 #ifdef __APPLE__
 extern int
@@ -104,7 +138,7 @@ zfs_vfs_sysctl(int *name, __unused u_int namelen, user_addr_t oldp, size_t *oldl
 		copyoutsize = sizeof (zfs_footprint_stats_t) +
 		              ((act_caches - 1) * sizeof (kmem_cache_stats_t));
 
-		error = copyout(footprint, oldp, copyoutsize);
+		error = ddi_copyout(footprint, oldp, copyoutsize, 0);
 
 		kmem_free(footprint, copyinsize);
 
@@ -129,126 +163,124 @@ zfs_vfs_sysctl(int *name, __unused u_int namelen, user_addr_t oldp, size_t *oldl
 #endif /* __APPLE__ */
 
 
-
-void
-system_taskq_fini(void)
-{
-    if (system_taskq)
-        taskq_destroy(system_taskq);
-}
-
-
 #include <sys/utsname.h>
 #include <string.h>
-
-void
-system_taskq_init(void)
-{
-
-    system_taskq = taskq_create("system_taskq",
-                                system_taskq_size * max_ncpus,
-                                minclsyspri, 4, 512,
-                                TASKQ_DYNAMIC | TASKQ_PREPOPULATE);
-
-
-}
-
-/*
- * fnv_32a_str - perform a 32 bit Fowler/Noll/Vo FNV-1a hash on a string
- *
- * input:
- *	str	- string to hash
- *	hval	- previous hash value or 0 if first call
- *
- * returns:
- *	32 bit hash as a static hash type
- *
- * NOTE: To use the recommended 32 bit FNV-1a hash, use FNV1_32A_INIT as the
- *  	 hval arg on the first call to either fnv_32a_buf() or fnv_32a_str().
- */
-#define FNV1_32A_INIT ((uint32_t)0x811c9dc5)
-uint32_t
-fnv_32a_str(const char *str, uint32_t hval)
-{
-    unsigned char *s = (unsigned char *)str;	/* unsigned string */
-
-    /*
-     * FNV-1a hash each octet in the buffer
-     */
-    while (*s) {
-
-	/* xor the bottom with the current octet */
-	hval ^= (uint32_t)*s++;
-
-	/* multiply by the 32 bit FNV magic prime mod 2^32 */
-#if defined(NO_FNV_GCC_OPTIMIZATION)
-	hval *= FNV_32_PRIME;
-#else
-	hval += (hval<<1) + (hval<<4) + (hval<<7) + (hval<<8) + (hval<<24);
-#endif
-    }
-
-    /* return our new hash value */
-    return hval;
-}
 
 
 } // Extern "C"
 
 
-
-
-bool net_lundman_zfs_zvol::init (OSDictionary* dict)
+bool
+net_lundman_zfs_zvol::init (OSDictionary* dict)
 {
-    bool res = super::init(dict);
-    //IOLog("ZFS::init\n");
-    global_c_interface = (void *)this;
-    return res;
+	bool res;
+
+	/* Need an OSSet for open clients */
+	_openClients = OSSet::withCapacity(1);
+	if (_openClients == NULL) {
+		dprintf("client OSSet failed");
+		return (false);
+	}
+
+	res = super::init(dict);
+
+	//IOLog("ZFS::init\n");
+	return res;
 }
 
-
-void net_lundman_zfs_zvol::free (void)
+void
+net_lundman_zfs_zvol::free (void)
 {
-  //IOLog("ZFS::free\n");
-    global_c_interface = NULL;
-    super::free();
+	OSSafeReleaseNULL(_openClients);
+
+	//IOLog("ZFS::free\n");
+	super::free();
 }
 
+bool
+net_lundman_zfs_zvol::isOpen(const IOService *forClient) const
+{
+	bool ret;
+	ret = IOService::isOpen(forClient);
+	return (ret);
+}
 
-IOService* net_lundman_zfs_zvol::probe (IOService* provider, SInt32* score)
+bool
+net_lundman_zfs_zvol::handleOpen(IOService *client,
+    IOOptionBits options, void *arg)
+{
+	bool ret = true;
+
+	dprintf("");
+	//IOLog("ZFSPool %s\n", __func__);
+
+	/* XXX IOService open() locks for arbitration around handleOpen */
+	//lockForArbitration();
+	_openClients->setObject(client);
+	ret = _openClients->containsObject(client);
+	//unlockForArbitration();
+
+	return (ret);
+//	return (IOService::handleOpen(client, options, NULL));
+}
+
+bool
+net_lundman_zfs_zvol::handleIsOpen(const IOService *client) const
+{
+	bool ret;
+
+	dprintf("");
+	//IOLog("ZFSPool %s\n", __func__);
+
+	/* XXX IOService isOpen() locks for arbitration around handleIsOpen */
+	//lockForArbitration();
+	ret = _openClients->containsObject(client);
+	//unlockForArbitration();
+
+	return (ret);
+//	return (IOService::handleIsOpen(client));
+}
+
+void
+net_lundman_zfs_zvol::handleClose(IOService *client,
+    IOOptionBits options)
+{
+	dprintf("");
+	//IOLog("ZFSPool %s\n", __func__);
+
+	/* XXX IOService close() locks for arbitration around handleClose */
+	//lockForArbitration();
+	if (_openClients->containsObject(client) == false) {
+		dprintf("not open");
+	}
+	/* Remove client from set */
+	_openClients->removeObject(client);
+	//unlockForArbitration();
+
+//	IOService::handleClose(client, options);
+}
+
+IOService*
+net_lundman_zfs_zvol::probe (IOService* provider, SInt32* score)
 {
     IOService *res = super::probe(provider, score);
     //IOLog("ZFS::probe\n");
     return res;
 }
 
-bool net_lundman_zfs_zvol::start (IOService *provider)
+static void zfs_start_continue(void *);
+
+bool
+net_lundman_zfs_zvol::start (IOService *provider)
 {
     bool res = super::start(provider);
 
-
     IOLog("ZFS: Loading module ... \n");
-	/*
-	 * Initialize znode cache, vnode ops, etc...
-	 */
-	zfs_znode_init();
 
-	/*
-	 * Initialize /dev/zfs, this calls spa_init->dmu_init->arc_init-> etc
-	 */
-	zfs_ioctl_init();
+	(void)thread_create(NULL, 0, zfs_start_continue, (void *)this, 0, 0, 0, 92);
 
-	///sysctl_register_oid(&sysctl__debug_maczfs);
-	//sysctl_register_oid(&sysctl__debug_maczfs_stalk);
-
-    zfs_vfsops_init();
-
-    /*
-     * When is the best time to start the system_taskq? It is strictly
-     * speaking not used by SPL, but by ZFS. ZFS should really start it?
-     */
-    system_taskq_init();
-
+	/* registerService() allows zconfigd to match against the service */
+	this->registerService();
 
     /*
      * hostid is left as 0 on OSX, and left to be set if developers wish to
@@ -281,23 +313,61 @@ bool net_lundman_zfs_zvol::start (IOService *provider)
       }
     }
 
-    return res;
+	return res;
 }
 
-void net_lundman_zfs_zvol::stop (IOService *provider)
+static void zfs_start_continue(void *this_arg)
 {
-
-
-#if 0
-  // You can not stop unload :(
-	if (zfs_active_fs_count != 0 ||
-	    spa_busy() ||
-	    zvol_busy()) {
-
-      IOLog("ZFS: Can not unload as we have filesystems mounted.\n");
-      return;
+	while(spl_initialised == 0) {
+		printf("ZFS: waiting for SPL init\n");
+		delay(hz >> 1);
 	}
+
+    sysctl_register_oid(&sysctl__zfs);
+    sysctl_register_oid(&sysctl__zfs_kext_version);
+
+	/* Init LDI */
+	int error = 0;
+	error = ldi_init(NULL);
+	if (error) {
+		IOLog("%s ldi_init error %d\n", __func__, error);
+		sysctl_unregister_oid(&sysctl__zfs_kext_version);
+		sysctl_unregister_oid(&sysctl__zfs);
+		thread_exit();
+		/* XXX Needs to fail ZFS start */
+	}
+
+	/*
+	 * Initialize /dev/zfs, this calls spa_init->dmu_init->arc_init-> etc
+	 */
+	zfs_ioctl_osx_init();
+
+	///sysctl_register_oid(&sysctl__debug_maczfs);
+	//sysctl_register_oid(&sysctl__debug_maczfs_stalk);
+
+    zfs_vfsops_init();
+
+    /*
+     * When is the best time to start the system_taskq? It is strictly
+     * speaking not used by SPL, but by ZFS. ZFS should really start it?
+     */
+    system_taskq_init();
+
+
+#ifdef ZFS_BOOT
+	zfs_boot_init((IOService *)this_arg);
 #endif
+
+	thread_exit();
+}
+
+void
+net_lundman_zfs_zvol::stop (IOService *provider)
+{
+#ifdef ZFS_BOOT
+	zfs_boot_fini();
+#endif
+
     IOLog("ZFS: Attempting to unload ...\n");
 
     super::stop(provider);
@@ -305,198 +375,21 @@ void net_lundman_zfs_zvol::stop (IOService *provider)
 
     system_taskq_fini();
 
-    zfs_ioctl_fini();
-    zvol_fini();
+    zfs_ioctl_osx_fini();
     zfs_vfsops_fini();
-    zfs_znode_fini();
 
-	//sysctl_unregister_oid(&sysctl__debug_maczfs_stalk);
-    //	sysctl_unregister_oid(&sysctl__debug_maczfs);
+	ldi_fini();
 
+    sysctl_unregister_oid(&sysctl__zfs_kext_version);
+    sysctl_unregister_oid(&sysctl__zfs);
     IOLog("ZFS: Unloaded module\n");
 
+	/*
+	 * There is no way to ensure all threads have actually got to the
+	 * thread_exit() call, before we exit here (and XNU unloads all
+	 * memory for the KEXT). So we increase the odds of that happening
+	 * by delaying a little bit before we return to XNU. Quite possibly
+	 * the worst "solution" but Apple has not given any good options.
+	 */
+	delay(hz*5);
 }
-
-
-IOReturn net_lundman_zfs_zvol::doEjectMedia(void *arg1)
-{
-  zvol_state_t *nub = (zvol_state_t *)arg1;
-  IOLog("block svc ejecting\n");
-  if(nub) {
-
-    // Only 10.6 needs special work to eject
-    if ((version_major == 10) &&
-	(version_minor == 8))
-      destroyBlockStorageDevice(nub);    
-
-  }
-
-  IOLog("block svc ejected\n");
-  return kIOReturnSuccess;
-}
-
-
-
-bool net_lundman_zfs_zvol::createBlockStorageDevice (zvol_state_t *zv)
-{
-    net_lundman_zfs_zvol_device *nub = NULL;
-    bool            result = false;
-
-    if (!zv) goto bail;
-
-    //IOLog("createBlock size %llu\n", zv->zv_volsize);
-
-    // Allocate a new IOBlockStorageDevice nub.
-    nub = new net_lundman_zfs_zvol_device;
-    if (nub == NULL)
-        goto bail;
-
-    // Call the custom init method (passing the overall disk size).
-    if (nub->init(zv) == false)
-        goto bail;
-
-    // Attach the IOBlockStorageDevice to the this driver.
-    // This call increments the reference count of the nub object,
-    // so we can release our reference at function exit.
-    if (nub->attach(this) == false)
-        goto bail;
-
-    // Allow the upper level drivers to match against the IOBlockStorageDevice.
-    /*
-     * We here use Synchronous, so that all services are attached now, then
-     * we can go look for the BSDName. We need this to create the correct
-     * symlinks.
-     */
-    nub->registerService( kIOServiceSynchronous);
-
-    nub->getBSDName();
-
-    if ((version_major != 10) &&
-	(version_minor != 8))
-      zvol_add_symlink(zv, &zv->zv_bsdname[1], zv->zv_bsdname);
-
-    result = true;
-
- bail:
-    // Unconditionally release the nub object.
-    if (nub != NULL)
-        nub->release();
-
-   return result;
-}
-
-bool net_lundman_zfs_zvol::destroyBlockStorageDevice (zvol_state_t *zv)
-{
-    net_lundman_zfs_zvol_device *nub = NULL;
-    bool            result = true;
-
-    if (zv->zv_iokitdev) {
-
-      //IOLog("removeBlockdevice\n");
-
-      nub = static_cast<net_lundman_zfs_zvol_device*>(zv->zv_iokitdev);
-
-      if ((version_major != 10) &&
-	  (version_minor != 8))
-	zvol_remove_symlink(zv);
-      
-      zv->zv_iokitdev = NULL;
-      zv = NULL;
-
-      nub->terminate();
-    }
-
-    return result;
-}
-
-bool net_lundman_zfs_zvol::updateVolSize(zvol_state_t *zv)
-{
-    net_lundman_zfs_zvol_device *nub = NULL;
-    //bool            result = true;
-
-    // Is it ok to keep a pointer reference to the nub like this?
-    if (zv->zv_iokitdev) {
-      nub = static_cast<net_lundman_zfs_zvol_device*>(zv->zv_iokitdev);
-
-      //IOLog("Attempting to update volsize\n");
-      nub->retain();
-      nub->registerService();
-      nub->release();
-    }
-    return true;
-}
-
-/*
- * Not used
- */
-IOByteCount net_lundman_zfs_zvol::performRead (IOMemoryDescriptor* dstDesc,
-                                               UInt64 byteOffset,
-                                               UInt64 byteCount)
-{
-  IOLog("performRead offset %llu count %llu\n", byteOffset, byteCount);
-    return dstDesc->writeBytes(0, (void*)((uintptr_t)m_buffer + byteOffset),
-                               byteCount);
-}
-
-/*
- * Not used
- */
-IOByteCount net_lundman_zfs_zvol::performWrite (IOMemoryDescriptor* srcDesc,
-                                                UInt64 byteOffset,
-                                                UInt64 byteCount)
-{
-  IOLog("performWrite offset %llu count %llu\n", byteOffset, byteCount);
-    return srcDesc->readBytes(0, (void*)((uintptr_t)m_buffer + byteOffset), byteCount);
-}
-
-
-/*
- * C language interfaces
- */
-
-int zvolCreateNewDevice(zvol_state_t *zv)
-{
-    static_cast<net_lundman_zfs_zvol*>(global_c_interface)->createBlockStorageDevice(zv);
-    return 0;
-}
-
-int zvolRemoveDevice(zvol_state_t *zv)
-{
-    static_cast<net_lundman_zfs_zvol*>(global_c_interface)->destroyBlockStorageDevice(zv);
-    return 0;
-}
-
-int zvolSetVolsize(zvol_state_t *zv)
-{
-    static_cast<net_lundman_zfs_zvol*>(global_c_interface)->updateVolSize(zv);
-    return 0;
-}
-
-
-uint64_t zvolIO_kit_read(void *iomem, uint64_t offset, char *address, uint64_t len)
-{
-  IOByteCount done;
-  //IOLog("zvolIO_kit_read offset %p count %llx to offset %llx\n",
-  //    address, len, offset);
-  done=static_cast<IOMemoryDescriptor*>(iomem)->writeBytes(offset,
-                                                           (void *)address,
-                                                           len);
-  return done;
-}
-
-uint64_t zvolIO_kit_write(void *iomem, uint64_t offset, char *address, uint64_t len)
-{
-  IOByteCount done;
-  //IOLog("zvolIO_kit_write offset %p count %llx to offset %llx\n",
-  //    address, len, offset);
-  done=static_cast<IOMemoryDescriptor*>(iomem)->readBytes(offset,
-                                                          (void *)address,
-                                                          len);
-  return done;
-}
-
-
-
-
-
-

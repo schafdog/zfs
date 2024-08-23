@@ -42,8 +42,6 @@
 #include <stdint.h>
 #endif
 
-#define	ZPIOS_MAJOR			232 /* XXX - Arbitrary */
-#define	ZPIOS_MINORS			1
 #define	ZPIOS_NAME			"zpios"
 #define	ZPIOS_DEV			"/dev/zpios"
 
@@ -145,13 +143,16 @@ zpios_timespec_normalize(zpios_timespec_t *ts, uint32_t sec, uint32_t nsec)
 		nsec -= NSEC_PER_SEC;
 		sec++;
 	}
+#ifdef LINUX
 	while (nsec < 0) {
 		nsec += NSEC_PER_SEC;
 		sec--;
 	}
+#endif
 	ts->ts_sec = sec;
 	ts->ts_nsec = nsec;
 }
+
 
 static inline
 zpios_timespec_t

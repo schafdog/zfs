@@ -24,6 +24,10 @@
  */
 
 /*
+ * Copyright (c) 2014 by Delphix. All rights reserved.
+ */
+
+/*
  * AVL - generic AVL tree implementation for kernel use
  *
  * A complete description of AVL trees can be found in many CS textbooks.
@@ -37,7 +41,7 @@
  * insertion and deletion relatively efficiently. Searching the tree is
  * still a fast operation, roughly O(log(N)).
  *
- * The key to insertion and deletion is a set of tree maniuplations called
+ * The key to insertion and deletion is a set of tree manipulations called
  * rotations, which bring unbalanced subtrees back into the semi-balanced state.
  *
  * This implementation of AVL trees has the following peculiarities:
@@ -45,7 +49,7 @@
  *	- The AVL specific data structures are physically embedded as fields
  *	  in the "using" data structures.  To maintain generality the code
  *	  must constantly translate between "avl_node_t *" and containing
- *	  data structure "void *"s by adding/subracting the avl_offset.
+ *	  data structure "void *"s by adding/subtracting the avl_offset.
  *
  *	- Since the AVL data is always embedded in other structures, there is
  *	  no locking or memory allocation in the AVL routines. This must be
@@ -85,6 +89,19 @@
  *	  is a modified "avl_node_t *".  The bottom bit (normally 0 for a
  *	  pointer) is set to indicate if that the new node has a value greater
  *	  than the value of the indicated "avl_node_t *".
+ *
+ * Note - in addition to userland (e.g. libavl and libutil) and the kernel
+ * (e.g. genunix), avl.c is compiled into ld.so and kmdb's genunix module,
+ * which each have their own compilation environments and subsequent
+ * requirements. Each of these environments must be considered when adding
+ * dependencies from avl.c.
+ */
+
+/*
+ * OSX note. The KERNEL version of this file has moved into
+ * spl-avl.c - This file is retained for userland.
+ *
+ * Please merge both files in future updates.
  */
 
 #include <sys/types.h>
@@ -94,7 +111,7 @@
 #include <sys/cmn_err.h>
 
 /*
- * Small arrays to translate between balance (or diff) values and child indeces.
+ * Small arrays to translate between balance (or diff) values and child indices.
  *
  * Code that deals with binary tree data structures will randomly use
  * left and right children when examining a tree.  C "if()" statements
@@ -114,7 +131,8 @@ static const int  avl_balance2child[]	= {0, 0, 1};
  *
  * - If there is a left child, go to it, then to it's rightmost descendant.
  *
- * - otherwise we return thru parent nodes until we've come from a right child.
+ * - otherwise we return through parent nodes until we've come from a right
+ *   child.
  *
  * Return Value:
  * NULL - if at the end of the nodes
@@ -741,7 +759,6 @@ avl_remove(avl_tree_t *tree, void *data)
 	 * be easily removed from the tree.
 	 */
 	ASSERT(tree->avl_numnodes > 0);
-    if (tree->avl_numnodes==0) panic("avl_numnodes is 0 before decrease1");
 	--tree->avl_numnodes;
 	parent = AVL_XPARENT(delete);
 	which_child = AVL_XCHILD(delete);
@@ -864,6 +881,23 @@ avl_update(avl_tree_t *t, void *obj)
 	return (B_FALSE);
 }
 
+void
+avl_swap(avl_tree_t *tree1, avl_tree_t *tree2)
+{
+	avl_node_t *temp_node;
+	ulong_t temp_numnodes;
+
+	ASSERT3P(tree1->avl_compar, ==, tree2->avl_compar);
+	ASSERT3U(tree1->avl_offset, ==, tree2->avl_offset);
+	ASSERT3U(tree1->avl_size, ==, tree2->avl_size);
+	temp_node = tree1->avl_root;
+	temp_numnodes = tree1->avl_numnodes;
+	tree1->avl_root = tree2->avl_root;
+	tree1->avl_numnodes = tree2->avl_numnodes;
+	tree2->avl_root = temp_node;
+	tree2->avl_numnodes = temp_numnodes;
+}
+
 /*
  * initialize a new AVL tree
  */
@@ -920,7 +954,7 @@ avl_is_empty(avl_tree_t *tree)
 
 /*
  * Post-order tree walk used to visit all tree nodes and destroy the tree
- * in post order. This is used for destroying a tree w/o paying any cost
+ * in post order. This is used for destroying a tree without paying any cost
  * for rebalancing it.
  *
  * example:
@@ -984,7 +1018,6 @@ avl_destroy_nodes(avl_tree_t *tree, void **cookie)
 	child = (uintptr_t)(*cookie) & CHILDBIT;
 	parent->avl_child[child] = NULL;
 	ASSERT(tree->avl_numnodes > 1);
-    if (tree->avl_numnodes<=1) panic("avl_numnodes is 0 before decrease2");
 	--tree->avl_numnodes;
 
 	/*
@@ -1032,13 +1065,24 @@ done:
 }
 
 #if defined(_KERNEL) && defined(HAVE_SPL)
+
 #if 0
+#include <linux/module_compat.h>
 
-static int avl_init(void) { return 0; }
-static int avl_fini(void) { return 0; }
+static int __init
+avl_init(void)
+{
+	return (0);
+}
 
-spl_module_init(avl_init);
-spl_module_exit(avl_fini);
+
+static void __exit
+avl_fini(void)
+{
+}
+
+module_init(avl_init);
+module_exit(avl_fini);
 
 MODULE_DESCRIPTION("Generic AVL tree implementation");
 MODULE_AUTHOR(ZFS_META_AUTHOR);
@@ -1054,6 +1098,8 @@ EXPORT_SYMBOL(avl_first);
 EXPORT_SYMBOL(avl_last);
 EXPORT_SYMBOL(avl_nearest);
 EXPORT_SYMBOL(avl_add);
+EXPORT_SYMBOL(avl_swap);
+EXPORT_SYMBOL(avl_is_empty);
 EXPORT_SYMBOL(avl_remove);
 EXPORT_SYMBOL(avl_numnodes);
 EXPORT_SYMBOL(avl_destroy_nodes);

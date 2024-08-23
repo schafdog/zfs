@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
  */
 
 /*
@@ -66,18 +66,49 @@ zfs_allocatable_devs(nvlist_t *nv)
 	return (B_FALSE);
 }
 
+/*
+ * Are there special vdevs?
+ */
+boolean_t
+zfs_special_devs(nvlist_t *nv, char *type)
+{
+	char *bias;
+	uint_t c;
+	nvlist_t **child;
+	uint_t children;
+
+	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
+	    &child, &children) != 0) {
+		return (B_FALSE);
+	}
+	for (c = 0; c < children; c++) {
+		if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_ALLOCATION_BIAS,
+		    &bias) == 0) {
+			if (strcmp(bias, VDEV_ALLOC_BIAS_SPECIAL) == 0 ||
+			    strcmp(bias, VDEV_ALLOC_BIAS_DEDUP) == 0) {
+				if (type != NULL && strcmp(bias, type) == 0) {
+					return (B_TRUE);
+				} else if (type == NULL) {
+					return (B_TRUE);
+				}
+			}
+		}
+	}
+	return (B_FALSE);
+}
+
 void
-zpool_get_rewind_policy(nvlist_t *nvl, zpool_rewind_policy_t *zrpp)
+zpool_get_load_policy(nvlist_t *nvl, zpool_load_policy_t *zlpp)
 {
 	nvlist_t *policy;
 	nvpair_t *elem;
 	char *nm;
 
 	/* Defaults */
-	zrpp->zrp_request = ZPOOL_NO_REWIND;
-	zrpp->zrp_maxmeta = 0;
-	zrpp->zrp_maxdata = UINT64_MAX;
-	zrpp->zrp_txg = UINT64_MAX;
+	zlpp->zlp_rewind = ZPOOL_NO_REWIND;
+	zlpp->zlp_maxmeta = 0;
+	zlpp->zlp_maxdata = UINT64_MAX;
+	zlpp->zlp_txg = UINT64_MAX;
 
 	if (nvl == NULL)
 		return;
@@ -85,24 +116,24 @@ zpool_get_rewind_policy(nvlist_t *nvl, zpool_rewind_policy_t *zrpp)
 	elem = NULL;
 	while ((elem = nvlist_next_nvpair(nvl, elem)) != NULL) {
 		nm = nvpair_name(elem);
-		if (strcmp(nm, ZPOOL_REWIND_POLICY) == 0) {
+		if (strcmp(nm, ZPOOL_LOAD_POLICY) == 0) {
 			if (nvpair_value_nvlist(elem, &policy) == 0)
-				zpool_get_rewind_policy(policy, zrpp);
+				zpool_get_load_policy(policy, zlpp);
 			return;
-		} else if (strcmp(nm, ZPOOL_REWIND_REQUEST) == 0) {
-			if (nvpair_value_uint32(elem, &zrpp->zrp_request) == 0)
-				if (zrpp->zrp_request & ~ZPOOL_REWIND_POLICIES)
-					zrpp->zrp_request = ZPOOL_NO_REWIND;
-		} else if (strcmp(nm, ZPOOL_REWIND_REQUEST_TXG) == 0) {
-			(void) nvpair_value_uint64(elem, &zrpp->zrp_txg);
-		} else if (strcmp(nm, ZPOOL_REWIND_META_THRESH) == 0) {
-			(void) nvpair_value_uint64(elem, &zrpp->zrp_maxmeta);
-		} else if (strcmp(nm, ZPOOL_REWIND_DATA_THRESH) == 0) {
-			(void) nvpair_value_uint64(elem, &zrpp->zrp_maxdata);
+		} else if (strcmp(nm, ZPOOL_LOAD_REWIND_POLICY) == 0) {
+			if (nvpair_value_uint32(elem, &zlpp->zlp_rewind) == 0)
+				if (zlpp->zlp_rewind & ~ZPOOL_REWIND_POLICIES)
+					zlpp->zlp_rewind = ZPOOL_NO_REWIND;
+		} else if (strcmp(nm, ZPOOL_LOAD_REQUEST_TXG) == 0) {
+			(void) nvpair_value_uint64(elem, &zlpp->zlp_txg);
+		} else if (strcmp(nm, ZPOOL_LOAD_META_THRESH) == 0) {
+			(void) nvpair_value_uint64(elem, &zlpp->zlp_maxmeta);
+		} else if (strcmp(nm, ZPOOL_LOAD_DATA_THRESH) == 0) {
+			(void) nvpair_value_uint64(elem, &zlpp->zlp_maxdata);
 		}
 	}
-	if (zrpp->zrp_request == 0)
-		zrpp->zrp_request = ZPOOL_NO_REWIND;
+	if (zlpp->zlp_rewind == 0)
+		zlpp->zlp_rewind = ZPOOL_NO_REWIND;
 }
 
 typedef struct zfs_version_spa_map {
@@ -158,6 +189,21 @@ zfs_spa_version_map(int zpl_version)
 	return (version);
 }
 
+boolean_t
+dataset_name_hidden(const char *name)
+{
+	/*
+	 * Skip over datasets that are not visible in this zone,
+	 * internal datasets (which have a $ in their name), and
+	 * temporary datasets (which have a % in their name).
+	 */
+	if (strchr(name, '$') != NULL)
+		return (B_TRUE);
+	if (strchr(name, '%') != NULL)
+		return (B_TRUE);
+	return (B_FALSE);
+}
+
 /*
  * This is the table of legacy internal event names; it should not be modified.
  * The internal events are now stored in the history log as strings.
@@ -208,7 +254,8 @@ const char *zfs_history_event_names[ZFS_NUM_LEGACY_HISTORY_EVENTS] = {
 
 #if defined(_KERNEL) && defined(HAVE_SPL)
 EXPORT_SYMBOL(zfs_allocatable_devs);
-EXPORT_SYMBOL(zpool_get_rewind_policy);
+EXPORT_SYMBOL(zfs_special_devs);
+EXPORT_SYMBOL(zpool_get_load_policy);
 EXPORT_SYMBOL(zfs_zpl_version_map);
 EXPORT_SYMBOL(zfs_spa_version_map);
 EXPORT_SYMBOL(zfs_history_event_names);

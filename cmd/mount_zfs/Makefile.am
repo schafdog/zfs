@@ -6,12 +6,7 @@ DEFAULT_INCLUDES += \
 	-I$(top_srcdir)/include \
 	-I$(top_srcdir)/lib/libspl/include
 
-#
-# Ignore the prefix for the mount helper.  It must be installed in /sbin/
-# because this path is hardcoded in the mount(8) for security reasons.
-#
-sbindir=/sbin
-sbin_PROGRAMS = mount.zfs
+sbin_PROGRAMS = mount_zfs
 
 mount_zfs_SOURCES = \
 	mount_zfs.c
@@ -23,4 +18,8 @@ mount_zfs_LDADD = \
 	$(top_builddir)/lib/libzfs/libzfs.la
 
 mount_zfs_LDFLAGS = \
-	-pthread -lm $(ZLIB) -ldl $(LIBUUID) $(LIBBLKID) $(LIBSELINUX)
+	-lm $(ZLIB) -ldl $(LIBUUID) $(LIBBLKID) $(LIBSELINUX)
+
+install-exec-hook:
+
+uninstall-hook:

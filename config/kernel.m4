@@ -6,14 +6,13 @@ AC_DEFUN([ZFS_AC_CONFIG_KERNEL], [
 	ZFS_AC_SPL
 	AC_SUBST(KERNELMAKE_PARAMS)
 
-
 	dnl # -Wall -fno-strict-aliasing -Wstrict-prototypes and other
 	dnl # compiler options are added by the kernel build system.
 	KERNELCPPFLAGS="$KERNELCPPFLAGS $NO_UNUSED_BUT_SET_VARIABLE"
 	KERNELCPPFLAGS="$KERNELCPPFLAGS -D_KERNEL -DKERNEL -DKERNEL_PRIVATE -mkernel"
-	KERNELCPPFLAGS="$KERNELCPPFLAGS -DAPPLE -DNeXT -DZFS_DEBUG_STR=\"beta\""
+	KERNELCPPFLAGS="$KERNELCPPFLAGS -DAPPLE -DNeXT"
 	KERNELCPPFLAGS="$KERNELCPPFLAGS -DTEXT_DOMAIN=\\\"zfs-kernel\\\""
-	KERNELCPPFLAGS="$KERNELCPPFLAGS -Wall -g -nostdinc -DZFS_DEBUG_STR=\beta\""
+	KERNELCPPFLAGS="$KERNELCPPFLAGS -Wall -g -nostdinc"
 	KERNELCPPFLAGS="$KERNELCPPFLAGS -DZFS_META_VERSION=\"\$(ZFS_META_VERSION)\""
 	KERNELCPPFLAGS="$KERNELCPPFLAGS -DZFS_META_RELEASE=\"\$(ZFS_META_RELEASE)\""
 
@@ -61,12 +60,12 @@ AC_DEFUN([ZFS_AC_KERNEL], [
 		[Path to kernel build objects]),
 		[kernelbuild="$withval"])
 
-	AC_ARG_WITH([kernel-modprefix],
-		AS_HELP_STRING([--with-kernel-modprefix=PATH],
-		[Path to kernel module prefix]),
-		[kernelmodprefix="$withval"])
-
 	AC_MSG_CHECKING([kernel source directory])
+	AS_IF([test -z "$kernelsrc"], [
+		system_major_version=`sw_vers -productVersion | $AWK -F '.' '{ print $[]1 "." $[]2 }'`
+		AS_IF([test -d "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX${system_major_version}.sdk/System/Library/Frameworks/Kernel.framework/Headers"], [
+			kernelsrc="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX${system_major_version}.sdk/System/Library/Frameworks/Kernel.framework"])
+	])
 	AS_IF([test -z "$kernelsrc"], [
 		AS_IF([test -d "/System/Library/Frameworks/Kernel.framework/Headers"], [
 			kernelsrc="/System/Library/Frameworks/Kernel.framework"])
@@ -75,6 +74,14 @@ AC_DEFUN([ZFS_AC_KERNEL], [
 		tmpdir=`xcrun --show-sdk-path`
 		AS_IF([test -d "$tmpdir/System/Library/Frameworks/Kernel.framework/Headers"], [
 			kernelsrc="$tmpdir/System/Library/Frameworks/Kernel.framework"])
+	])
+	AS_IF([test -z "$kernelsrc"], [
+		AS_IF([test -d "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.10.sdk/System/Library/Frameworks/Kernel.framework"], [
+			kernelsrc="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.10.sdk/System/Library/Frameworks/Kernel.framework"])
+	])
+	AS_IF([test -z "$kernelsrc"], [
+		AS_IF([test -d "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk/System/Library/Frameworks/Kernel.framework"], [
+			kernelsrc="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk/System/Library/Frameworks/Kernel.framework"])
 	])
 	AS_IF([test -z "$kernelsrc"], [
 		AS_IF([test -d "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.9.sdk/System/Library/Frameworks/Kernel.framework"], [
@@ -163,23 +170,15 @@ AC_DEFUN([ZFS_AC_KERNEL], [
 
 	AC_MSG_RESULT([$kernsrcver])
 
-	AC_MSG_CHECKING([kernel module prefix])
-	AS_IF([test -z "$kernelmodprefix"], [
-		kernelmodprefix="/System/Library/Extensions"
-	])
-	AC_MSG_RESULT([$kernelmodprefix])
-
 	LINUX=${kernelsrc}
 	LINUX_OBJ=${kernelbuild}
 	LINUX_VERSION=${kernsrcver}
 	KERNELSRC="${kernelsrc}/Headers"
-	KERNEL_MODPREFIX=${kernelmodprefix}
 
 	AC_SUBST(LINUX)
 	AC_SUBST(LINUX_OBJ)
 	AC_SUBST(LINUX_VERSION)
 	AC_SUBST(KERNELSRC)
-	AC_SUBST(KERNEL_MODPREFIX)
 
 	ZFS_AC_MODULE_SYMVERS
 ])
@@ -209,16 +208,16 @@ AC_DEFUN([ZFS_AC_SPL], [
 		dnl #
 		dnl # Look in the standard development package location
 		dnl #
-		sourcelink=`ls -1d /usr/src/spl-*/${LINUX_VERSION} \
-		            2>/dev/null | tail -1`
+		dnl	#	sourcelink=`ls -1d /usr/src/spl-*/${LINUX_VERSION} \
+		dnl #           2>/dev/null | tail -1`
 
 		dnl #
 		dnl # Look in the DKMS source location
 		dnl #
-		AS_IF([test -z "$sourcelink" || test ! -e $sourcelink/spl_config.h], [
-			sourcelink=`ls -1d /var/lib/dkms/spl/*/build \
-			            2>/dev/null | tail -1`
-		])
+		dnl # AS_IF([test -z "$sourcelink" || test ! -e $sourcelink/spl_config.h], [
+		dnl #	sourcelink=`ls -1d /var/lib/dkms/spl/*/build \
+		dnl #	            2>/dev/null | tail -1`
+		dnl # ])
 
 		dnl #
 		dnl # Look in the parent directory
@@ -285,6 +284,8 @@ AC_DEFUN([ZFS_AC_SPL], [
 				splbuild="${splsrc}/${LINUX_VERSION}"
 			], [ test -e "${splsrc}/spl_config.h" ], [
 				splbuild="${splsrc}"
+			], [ find -L "${splsrc}" -name spl_config.h 2> /dev/null | grep -wq spl_config.h ], [
+				splbuild=$(find -L "${splsrc}" -name spl_config.h | sed 's,/spl_config.h,,')
 			], [
 				splbuild="[Not found]"
 			])
@@ -379,8 +380,8 @@ AC_DEFUN([ZFS_AC_SPL], [
 dnl #
 dnl # Basic toolchain sanity check.
 dnl #
-AC_DEFUN([ZFS_AC_TEST_MODULE],
-	[AC_MSG_CHECKING([whether modules can be built])
+AC_DEFUN([ZFS_AC_TEST_MODULE], [
+	AC_MSG_CHECKING([whether modules can be built])
 	ZFS_LINUX_TRY_COMPILE([],[],[
 		AC_MSG_RESULT([yes])
 	],[
@@ -401,10 +402,16 @@ dnl # detected at configure time and cause a build failure.  Otherwise
 dnl # modules may be successfully built that behave incorrectly.
 dnl #
 AC_DEFUN([ZFS_AC_KERNEL_CONFIG], [
-
-	AS_IF([test "$ZFS_META_LICENSE" = GPL], [
-		AC_DEFINE([HAVE_GPL_ONLY_SYMBOLS], [1],
-			[Define to 1 if licensed under the GPL])
+	AC_RUN_IFELSE([
+		AC_LANG_PROGRAM([
+			#include "$LINUX/include/linux/license.h"
+		], [
+			return !license_is_gpl_compatible("$ZFS_META_LICENSE");
+		])
+	], [
+		AC_DEFINE([ZFS_IS_GPL_COMPATIBLE], [1],
+		    [Define to 1 if GPL-only symbols can be used])
+	], [
 	])
 
 	ZFS_AC_KERNEL_CONFIG_DEBUG_LOCK_ALLOC

@@ -21,7 +21,8 @@
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+ * Copyright (c) 2014 Integros [integros.com]
  */
 
 #include <sys/zio.h>
@@ -81,10 +82,16 @@ zpool_prop_init(void)
 	    ZFS_TYPE_POOL, "<size>", "FREE");
 	zprop_register_number(ZPOOL_PROP_FREEING, "freeing", 0, PROP_READONLY,
 	    ZFS_TYPE_POOL, "<size>", "FREEING");
+	zprop_register_number(ZPOOL_PROP_CHECKPOINT, "checkpoint", 0,
+	    PROP_READONLY, ZFS_TYPE_POOL, "<size>", "CKPOINT");
+	zprop_register_number(ZPOOL_PROP_LEAKED, "leaked", 0, PROP_READONLY,
+	    ZFS_TYPE_POOL, "<size>", "LEAKED");
 	zprop_register_number(ZPOOL_PROP_ALLOCATED, "allocated", 0,
 	    PROP_READONLY, ZFS_TYPE_POOL, "<size>", "ALLOC");
 	zprop_register_number(ZPOOL_PROP_EXPANDSZ, "expandsize", 0,
 	    PROP_READONLY, ZFS_TYPE_POOL, "<size>", "EXPANDSZ");
+	zprop_register_number(ZPOOL_PROP_FRAGMENTATION, "fragmentation", 0,
+	    PROP_READONLY, ZFS_TYPE_POOL, "<percent>", "FRAG");
 	zprop_register_number(ZPOOL_PROP_CAPACITY, "capacity", 0, PROP_READONLY,
 	    ZFS_TYPE_POOL, "<size>", "CAP");
 	zprop_register_number(ZPOOL_PROP_GUID, "guid", 0, PROP_READONLY,
@@ -102,8 +109,8 @@ zpool_prop_init(void)
 	/* default number properties */
 	zprop_register_number(ZPOOL_PROP_VERSION, "version", SPA_VERSION,
 	    PROP_DEFAULT, ZFS_TYPE_POOL, "<version>", "VERSION");
-	zprop_register_number(ZPOOL_PROP_DEDUPDITTO, "dedupditto", 0,
-	    PROP_DEFAULT, ZFS_TYPE_POOL, "<threshold (min 100)>", "DEDUPDITTO");
+	zprop_register_number(ZPOOL_PROP_ASHIFT, "ashift", 0, PROP_DEFAULT,
+	    ZFS_TYPE_POOL, "<ashift, 9-16, or 0=default>", "ASHIFT");
 
 	/* default index (boolean) properties */
 	zprop_register_index(ZPOOL_PROP_DELEGATION, "delegation", 1,
@@ -118,15 +125,29 @@ zpool_prop_init(void)
 	    PROP_DEFAULT, ZFS_TYPE_POOL, "on | off", "EXPAND", boolean_table);
 	zprop_register_index(ZPOOL_PROP_READONLY, "readonly", 0,
 	    PROP_DEFAULT, ZFS_TYPE_POOL, "on | off", "RDONLY", boolean_table);
+	zprop_register_index(ZPOOL_PROP_MULTIHOST, "multihost", 0,
+	    PROP_DEFAULT, ZFS_TYPE_POOL, "on | off", "MULTIHOST",
+	    boolean_table);
 
 	/* default index properties */
 	zprop_register_index(ZPOOL_PROP_FAILUREMODE, "failmode",
 	    ZIO_FAILURE_MODE_WAIT, PROP_DEFAULT, ZFS_TYPE_POOL,
 	    "wait | continue | panic", "FAILMODE", failuremode_table);
+	zprop_register_index(ZPOOL_PROP_AUTOTRIM, "autotrim",
+	    SPA_AUTOTRIM_OFF, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    "on | off", "AUTOTRIM", boolean_table);
 
 	/* hidden properties */
 	zprop_register_hidden(ZPOOL_PROP_NAME, "name", PROP_TYPE_STRING,
 	    PROP_READONLY, ZFS_TYPE_POOL, "NAME");
+	zprop_register_hidden(ZPOOL_PROP_MAXBLOCKSIZE, "maxblocksize",
+	    PROP_TYPE_NUMBER, PROP_READONLY, ZFS_TYPE_POOL, "MAXBLOCKSIZE");
+	zprop_register_hidden(ZPOOL_PROP_TNAME, "tname", PROP_TYPE_STRING,
+	    PROP_ONETIME, ZFS_TYPE_POOL, "TNAME");
+	zprop_register_hidden(ZPOOL_PROP_MAXDNODESIZE, "maxdnodesize",
+	    PROP_TYPE_NUMBER, PROP_READONLY, ZFS_TYPE_POOL, "MAXDNODESIZE");
+	zprop_register_hidden(ZPOOL_PROP_DEDUPDITTO, "dedupditto",
+	    PROP_TYPE_NUMBER, PROP_DEFAULT, ZFS_TYPE_POOL, "DEDUPDITTO");
 }
 
 /*

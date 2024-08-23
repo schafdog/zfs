@@ -41,6 +41,25 @@ extern "C" {
 struct zfs_sb;
 struct znode;
 
+#ifdef __APPLE__
+#define APPLE_SA_RECOVER
+/* #define WITH_SEARCHFS */
+/* #define WITH_READDIRATTR */
+#define	HAVE_NAMED_STREAMS 1
+#define	HAVE_PAGEOUT_V2 1
+#define HIDE_TRIVIAL_ACL 1
+#endif
+
+/*
+ * Status of the zfs_unlinked_drain thread.
+ */
+typedef enum drain_state {
+	ZFS_DRAIN_SHUTDOWN = 0,
+	ZFS_DRAIN_RUNNING,
+    ZFS_DRAIN_SHUTDOWN_REQ
+} drain_state_t;
+
+
 typedef struct zfsvfs zfsvfs_t;
 
 struct zfsvfs {
@@ -67,29 +86,51 @@ struct zfsvfs {
         int             z_norm;         /* normalization flags */
         boolean_t       z_atime;        /* enable atimes mount option */
         boolean_t       z_unmounted;    /* unmounted */
-	    rrwlock_t	    z_teardown_lock;
+	    rrmlock_t	    z_teardown_lock;
         krwlock_t	    z_teardown_inactive_lock;
         list_t          z_all_znodes;   /* all vnodes in the fs */
         kmutex_t        z_znodes_lock;  /* lock for z_all_znodes */
         struct vnode   *z_ctldir;      /* .zfs directory pointer */
-        time_t          z_mount_time;           /* mount timestamp (for Spotlight) */
-        time_t          z_last_unmount_time;    /* unmount timestamp (for Spotlight) */
-        time_t          z_last_mtime_synced;    /* last fs mtime synced to disk */
-        struct vnode   *z_mtime_vp;            /* znode utilized for the fs mtime. */
         boolean_t       z_show_ctldir;  /* expose .zfs in the root dir */
         boolean_t       z_issnap;       /* true if this is a snapshot */
         boolean_t	    z_use_fuids;	/* version allows fuids */
         boolean_t       z_replay;       /* set during ZIL replay */
         boolean_t       z_use_sa;       /* version allow system attributes */
+	    boolean_t       z_xattr_sa;     /* allow xattrs to be stores as SA */
         uint64_t        z_version;
         uint64_t        z_shares_dir;   /* hidden shares dir */
         kmutex_t	    z_lock;
-        kmutex_t	    z_reclaim_list_lock; /* lock for using z_reclaim_list*/
-        uint64_t        z_vnode_create_depth;/* inc/dec before/after vnode_create */
-        list_t          z_reclaim_znodes;/* all reclaimed vnodes in the fs*/
-        boolean_t       z_reclaim_thread_exit;
-        kmutex_t		z_reclaim_thr_lock;
-        kcondvar_t	    z_reclaim_thr_cv;	/* used to signal reclaim thr */
+
+        /* for controlling async zfs_unlinked_drain */
+        kmutex_t		z_drain_lock;
+        kcondvar_t		z_drain_cv;
+        drain_state_t	z_drain_state;
+
+#ifdef __APPLE__
+	dev_t		z_rdev;		/* proxy device for mount */
+	boolean_t	z_rdonly;	/* is mount read-only? */
+        time_t          z_mount_time;           /* mount timestamp (for Spotlight) */
+        time_t          z_last_unmount_time;    /* unmount timestamp (for Spotlight) */
+        boolean_t       z_xattr;        /* enable atimes mount option */
+
+	    avl_tree_t   	z_hardlinks;    /* linkid hash avl tree for vget */
+	    avl_tree_t   	z_hardlinks_linkid; /* same tree, sorted on linkid */
+	    krwlock_t	    z_hardlinks_lock;	/* lock to access z_hardlinks */
+
+	    uint64_t	    z_notification_conditions; /* HFSIOC_VOLUME_STATUS */
+	    uint64_t	    z_freespace_notify_warninglimit; /* HFSIOC_ - number of free blocks */
+	    uint64_t	    z_freespace_notify_dangerlimit; /* HFSIOC_ - number of free blocks */
+	    uint64_t	    z_freespace_notify_desiredlevel; /* HFSIOC_ - number of free blocks */
+
+	void *z_devdisk; /* Hold fake disk if prop devdisk is on */
+
+#ifdef APPLE_SA_RECOVER
+	    uint64_t        z_recover_parent;/* Temporary holder until SA corruption are gone */
+#endif /* APPLE_SA_RECOVER */
+
+	    uint64_t        z_findernotify_space;
+
+#endif
     	uint64_t	    z_userquota_obj;
         uint64_t	    z_groupquota_obj;
         uint64_t	    z_replay_eof;	/* New end of file - replay only */
@@ -97,6 +138,22 @@ struct zfsvfs {
 #define ZFS_OBJ_MTX_SZ  256
         kmutex_t        z_hold_mtx[ZFS_OBJ_MTX_SZ];     /* znode hold locks */
 };
+
+
+#ifdef __APPLE__
+struct hardlinks_struct {
+	avl_node_t hl_node;
+	avl_node_t hl_node_linkid;
+	uint64_t hl_parent;     // parentid of entry
+	uint64_t hl_fileid;     // the fileid (z_id) for vget
+	uint32_t hl_linkid;     // the linkid, persistent over renames
+	char hl_name[PATH_MAX]; // cached name for vget
+};
+typedef struct hardlinks_struct hardlinks_t;
+
+int zfs_vfs_uuid_unparse(uuid_t uuid, char *dst);
+int zfs_vfs_uuid_gen(const char *osname, uuid_t uuid);
+#endif
 
 
 #define	ZFS_SUPER_MAGIC	0x2fc12fc1
@@ -161,7 +218,7 @@ typedef struct zfid_long {
 extern uint_t zfs_fsyncer_key;
 
 extern int zfs_suspend_fs(zfsvfs_t *zfsvfs);
-extern int zfs_resume_fs(zfsvfs_t *zfsvfs, const char *osname);
+extern int zfs_resume_fs(zfsvfs_t *zfsvfs, struct dsl_dataset *ds);
 extern int zfs_userspace_one(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     const char *domain, uint64_t rid, uint64_t *valuep);
 extern int zfs_userspace_many(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
@@ -173,9 +230,12 @@ extern boolean_t zfs_owner_overquota(zfsvfs_t *zfsvfs, struct znode *,
 extern boolean_t zfs_fuid_overquota(zfsvfs_t *zfsvfs, boolean_t isgroup,
     uint64_t fuid);
 extern int zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers);
+extern int zfsvfs_create(const char *name, zfsvfs_t **zfvp);
+extern int zfsvfs_create_impl(zfsvfs_t **zfvp, zfsvfs_t *zfsvfs, objset_t *os);
 
 extern int zfs_get_zplprop(objset_t *os, zfs_prop_t prop,
     uint64_t *value);
+
 extern int zfs_sb_create(const char *name, zfsvfs_t **zfsvfsp);
 extern int zfs_sb_setup(zfsvfs_t *zfsvfs, boolean_t mounting);
 extern void zfs_sb_free(zfsvfs_t *zfsvfs);
@@ -198,6 +258,7 @@ extern int  zfs_vfs_fhtovp (struct mount *mp, int fhlen, unsigned char *fhp, vno
 extern int  zfs_vfs_vptofh (vnode_t *vp, int *fhlenp, unsigned char *fhp, vfs_context_t context);
 extern int  zfs_vfs_sysctl (int *name, u_int namelen, user_addr_t oldp, size_t *oldlenp,  user_addr_t newp, size_t newlen, vfs_context_t context);
 extern int  zfs_vfs_quotactl ( struct mount *mp, int cmds, uid_t uid, caddr_t datap, vfs_context_t context);
+extern int  zfs_vfs_mountroot(struct mount *mp, struct vnode *vp, vfs_context_t context);
 
 extern void zfs_init(void);
 extern void zfs_fini(void);

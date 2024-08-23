@@ -16,9 +16,11 @@ zpool_SOURCES = \
 	zpool_vdev.c
 
 zpool_LDADD = \
+	$(top_builddir)/lib/libdiskmgt/libdiskmgt.la \
 	$(top_builddir)/lib/libnvpair/libnvpair.la \
 	$(top_builddir)/lib/libuutil/libuutil.la \
 	$(top_builddir)/lib/libzpool/libzpool.la \
 	$(top_builddir)/lib/libzfs/libzfs.la
+	$(top_builddir)/lib/libzfs_core/libzfs_core.la
 
-zpool_LDFLAGS = -pthread -lm $(ZLIB) -ldl $(LIBUUID) $(LIBBLKID)
+zpool_LDFLAGS = -lm $(ZLIB) -ldl $(LIBUUID) $(LIBBLKID)

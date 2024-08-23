@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <sys/mount.h>
+#include <sys/mntent.h>
 #include <sys/stat.h>
 #include <libzfs.h>
 #include <locale.h>
@@ -244,7 +245,7 @@ parse_dataset(char *dataset)
 		if (fd < 0)
 			goto out;
 
-		error = zpool_read_label(fd, &config);
+		error = zpool_read_label(fd, &config, NULL);
 		(void) close(fd);
 		if (error)
 			goto out;
@@ -346,8 +347,10 @@ mtab_update(char *dataset, char *mntpoint, char *type, char *mntopts)
 int
 main(int argc, char **argv)
 {
+#if 0
 	zfs_handle_t *zhp;
 	char prop[ZFS_MAXPROPLEN];
+	uint64_t zfs_version = 0;
 	char mntopts[MNT_LINE_MAX] = { '\0' };
 	char badopt[MNT_LINE_MAX] = { '\0' };
 	char mtabopt[MNT_LINE_MAX] = { '\0' };
@@ -356,6 +359,7 @@ main(int argc, char **argv)
 	unsigned long mntflags = 0, zfsflags = 0, remount = 0;
 	int sloppy = 0, fake = 0, verbose = 0, nomtab = 0, zfsutil = 0;
 	int error, c;
+#endif
 
     return -1;
 
@@ -461,8 +465,10 @@ main(int argc, char **argv)
 	if (zfsflags & ZS_ZFSUTIL)
 		zfsutil = 1;
 
-	if ((g_zfs = libzfs_init()) == NULL)
+	if ((g_zfs = libzfs_init()) == NULL) {
+		(void) fprintf(stderr, "%s", libzfs_error_init(errno));
 		return (MOUNT_SYSERR);
+	}
 
 	/* try to open the dataset to access the mount point */
 	if ((zhp = zfs_open(g_zfs, dataset,
@@ -492,10 +498,13 @@ main(int argc, char **argv)
 			    ZFS_PROP_SELINUX_ROOTCONTEXT, MNTOPT_ROOTCONTEXT,
 			    mntopts, mtabopt);
 		} else {
-			__zfs_selinux_setcontext(MNTOPT_CONTEXT,
-			    prop, mntopts, mtabopt);
+			append_mntopt(MNTOPT_CONTEXT, prop,
+			    mntopts, mtabopt, B_TRUE);
 		}
 	}
+
+	/* A hint used to determine an auto-mounted snapshot mount point */
+	append_mntopt(MNTOPT_MNTPOINT, mntpoint, mntopts, NULL, B_FALSE);
 
 	/* treat all snapshots as legacy mount points */
 	if (zfs_get_type(zhp) == ZFS_TYPE_SNAPSHOT)
@@ -503,6 +512,18 @@ main(int argc, char **argv)
 	else
 		(void) zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT, prop,
 		    sizeof (prop), NULL, NULL, 0, B_FALSE);
+
+	/*
+	 * Fetch the max supported zfs version in case we get ENOTSUP
+	 * back from the mount command, since we need the zfs handle
+	 * to do so.
+	 */
+	zfs_version = zfs_prop_get_int(zhp, ZFS_PROP_VERSION);
+	if (zfs_version == 0) {
+		fprintf(stderr, gettext("unable to fetch "
+		    "ZFS version for filesystem '%s'\n"), dataset);
+		return (MOUNT_SYSERR);
+	}
 
 	zfs_close(zhp);
 	libzfs_fini(g_zfs);
@@ -540,22 +561,36 @@ main(int argc, char **argv)
 	if (!fake) {
 		error = mount(dataset, mntpoint, MNTTYPE_ZFS,
 		    mntflags, mntopts);
-		if (error) {
-			switch (errno) {
-			case ENOENT:
-				(void) fprintf(stderr, gettext("mount point "
-				    "'%s' does not exist\n"), mntpoint);
-				return (MOUNT_SYSERR);
-			case EBUSY:
-				(void) fprintf(stderr, gettext("filesystem "
-				    "'%s' is already mounted\n"), dataset);
-				return (MOUNT_BUSY);
-			default:
-				(void) fprintf(stderr, gettext("filesystem "
-				    "'%s' can not be mounted due to error "
-				    "%d\n"), dataset, errno);
-				return (MOUNT_USAGE);
+	}
+
+	if (error) {
+		switch (errno) {
+		case ENOENT:
+			(void) fprintf(stderr, gettext("mount point "
+			    "'%s' does not exist\n"), mntpoint);
+			return (MOUNT_SYSERR);
+		case EBUSY:
+			(void) fprintf(stderr, gettext("filesystem "
+			    "'%s' is already mounted\n"), dataset);
+			return (MOUNT_BUSY);
+		case ENOTSUP:
+			if (zfs_version > ZPL_VERSION) {
+				(void) fprintf(stderr,
+				    gettext("filesystem '%s' (v%d) is not "
+				    "supported by this implementation of "
+				    "ZFS (max v%d).\n"), dataset,
+				    (int) zfs_version, (int) ZPL_VERSION);
+			} else {
+				(void) fprintf(stderr,
+				    gettext("filesystem '%s' mount "
+				    "failed for unknown reason.\n"), dataset);
 			}
+			return (MOUNT_SYSERR);
+		default:
+			(void) fprintf(stderr, gettext("filesystem "
+			    "'%s' can not be mounted due to error "
+			    "%d\n"), dataset, errno);
+			return (MOUNT_USAGE);
 		}
 	}
 

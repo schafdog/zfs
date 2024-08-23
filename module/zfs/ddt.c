@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2016 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -36,6 +36,7 @@
 #include <sys/zio_checksum.h>
 #include <sys/zio_compress.h>
 #include <sys/dsl_scan.h>
+#include <sys/abd.h>
 
 static kmem_cache_t *ddt_cache;
 static kmem_cache_t *ddt_entry_cache;
@@ -43,7 +44,7 @@ static kmem_cache_t *ddt_entry_cache;
 /*
  * Enable/disable prefetching of dedup-ed blocks which are going to be freed.
  */
-int zfs_dedup_prefetch = 1;
+int zfs_dedup_prefetch = 0;
 
 static const ddt_ops_t *ddt_ops[DDT_TYPES] = {
 	&ddt_zap_ops,
@@ -62,7 +63,8 @@ ddt_object_create(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
 	spa_t *spa = ddt->ddt_spa;
 	objset_t *os = ddt->ddt_os;
 	uint64_t *objectp = &ddt->ddt_object[type][class];
-	boolean_t prehash = zio_checksum_table[ddt->ddt_checksum].ci_dedup;
+	boolean_t prehash = zio_checksum_table[ddt->ddt_checksum].ci_flags &
+	    ZCHECKSUM_FLAG_DEDUP;
 	char name[DDT_NAMELEN];
 
 	ddt_object_name(ddt, type, class, name);
@@ -86,14 +88,13 @@ ddt_object_destroy(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
 	spa_t *spa = ddt->ddt_spa;
 	objset_t *os = ddt->ddt_os;
 	uint64_t *objectp = &ddt->ddt_object[type][class];
-	uint64_t count;
 	char name[DDT_NAMELEN];
 
 	ddt_object_name(ddt, type, class, name);
 
 	ASSERT(*objectp != 0);
+	ASSERT(ddt_object_count(ddt, type, class) == 0);
 	ASSERT(ddt_histogram_empty(&ddt->ddt_histogram[type][class]));
-	VERIFY(ddt_object_count(ddt, type, class, &count) == 0 && count == 0);
 	VERIFY(zap_remove(os, DMU_POOL_DIRECTORY_OBJECT, name, tx) == 0);
 	VERIFY(zap_remove(os, spa->spa_ddt_stat_object, name, tx) == 0);
 	VERIFY(ddt_ops[type]->ddt_op_destroy(os, *objectp, tx) == 0);
@@ -107,7 +108,6 @@ ddt_object_load(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
 {
 	ddt_object_t *ddo = &ddt->ddt_object_stats[type][class];
 	dmu_object_info_t doi;
-	uint64_t count;
 	char name[DDT_NAMELEN];
 	int error;
 
@@ -115,31 +115,25 @@ ddt_object_load(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
 
 	error = zap_lookup(ddt->ddt_os, DMU_POOL_DIRECTORY_OBJECT, name,
 	    sizeof (uint64_t), 1, &ddt->ddt_object[type][class]);
-
-	if (error)
+	if (error != 0)
 		return (error);
 
 	error = zap_lookup(ddt->ddt_os, ddt->ddt_spa->spa_ddt_stat_object, name,
 	    sizeof (uint64_t), sizeof (ddt_histogram_t) / sizeof (uint64_t),
 	    &ddt->ddt_histogram[type][class]);
+	if (error != 0)
+		return (error);
 
 	/*
 	 * Seed the cached statistics.
 	 */
-	error = ddt_object_info(ddt, type, class, &doi);
-	if (error)
-		return (error);
+	VERIFY(ddt_object_info(ddt, type, class, &doi) == 0);
 
-	error = ddt_object_count(ddt, type, class, &count);
-	if (error)
-		return (error);
-
-	ddo->ddo_count = count;
+	ddo->ddo_count = ddt_object_count(ddt, type, class);
 	ddo->ddo_dspace = doi.doi_physical_blocks_512 << 9;
 	ddo->ddo_mspace = doi.doi_fill_count * doi.doi_data_block_size;
 
-	ASSERT(error == 0);
-	return (error);
+	return (0);
 }
 
 static void
@@ -148,7 +142,6 @@ ddt_object_sync(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
 {
 	ddt_object_t *ddo = &ddt->ddt_object_stats[type][class];
 	dmu_object_info_t doi;
-	uint64_t count;
 	char name[DDT_NAMELEN];
 
 	ddt_object_name(ddt, type, class, name);
@@ -161,9 +154,8 @@ ddt_object_sync(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
 	 * Cache DDT statistics; this is the only time they'll change.
 	 */
 	VERIFY(ddt_object_info(ddt, type, class, &doi) == 0);
-	VERIFY(ddt_object_count(ddt, type, class, &count) == 0);
 
-	ddo->ddo_count = count;
+	ddo->ddo_count = ddt_object_count(ddt, type, class);
 	ddo->ddo_dspace = doi.doi_physical_blocks_512 << 9;
 	ddo->ddo_mspace = doi.doi_fill_count * doi.doi_data_block_size;
 }
@@ -220,15 +212,15 @@ ddt_object_walk(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
 	    ddt->ddt_object[type][class], dde, walk));
 }
 
-int
-ddt_object_count(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
-    uint64_t *count)
+uint64_t
+ddt_object_count(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
 {
 	ASSERT(ddt_object_exists(ddt, type, class));
 
 	return (ddt_ops[type]->ddt_op_count(ddt->ddt_os,
-	    ddt->ddt_object[type][class], count));
+	    ddt->ddt_object[type][class]));
 }
+
 
 int
 ddt_object_info(ddt_t *ddt, enum ddt_type type, enum ddt_class class,
@@ -267,6 +259,10 @@ ddt_bp_fill(const ddt_phys_t *ddp, blkptr_t *bp, uint64_t txg)
 	BP_SET_BIRTH(bp, txg, ddp->ddp_phys_birth);
 }
 
+/*
+ * The bp created via this function may be used for repairs and scrub, but it
+ * will be missing the salt / IV required to do a full decrypting read.
+ */
 void
 ddt_bp_create(enum zio_checksum checksum,
     const ddt_key_t *ddk, const ddt_phys_t *ddp, blkptr_t *bp)
@@ -277,15 +273,16 @@ ddt_bp_create(enum zio_checksum checksum,
 		ddt_bp_fill(ddp, bp, ddp->ddp_phys_birth);
 
 	bp->blk_cksum = ddk->ddk_cksum;
-	bp->blk_fill = 1;
 
 	BP_SET_LSIZE(bp, DDK_GET_LSIZE(ddk));
 	BP_SET_PSIZE(bp, DDK_GET_PSIZE(ddk));
 	BP_SET_COMPRESS(bp, DDK_GET_COMPRESS(ddk));
+	BP_SET_CRYPT(bp, DDK_GET_CRYPT(ddk));
+	BP_SET_FILL(bp, 1);
 	BP_SET_CHECKSUM(bp, checksum);
 	BP_SET_TYPE(bp, DMU_OT_DEDUP);
 	BP_SET_LEVEL(bp, 0);
-	BP_SET_DEDUP(bp, 0);
+	BP_SET_DEDUP(bp, 1);
 	BP_SET_BYTEORDER(bp, ZFS_HOST_BYTEORDER);
 }
 
@@ -295,9 +292,12 @@ ddt_key_fill(ddt_key_t *ddk, const blkptr_t *bp)
 	ddk->ddk_cksum = bp->blk_cksum;
 	ddk->ddk_prop = 0;
 
+	ASSERT(BP_IS_ENCRYPTED(bp) || !BP_USES_CRYPT(bp));
+
 	DDK_SET_LSIZE(ddk, BP_GET_LSIZE(bp));
 	DDK_SET_PSIZE(ddk, BP_GET_PSIZE(bp));
 	DDK_SET_COMPRESS(ddk, BP_GET_COMPRESS(bp));
+	DDK_SET_CRYPT(ddk, BP_USES_CRYPT(bp));
 }
 
 void
@@ -338,6 +338,13 @@ ddt_phys_free(ddt_t *ddt, ddt_key_t *ddk, ddt_phys_t *ddp, uint64_t txg)
 	blkptr_t blk;
 
 	ddt_bp_create(ddt->ddt_checksum, ddk, ddp, &blk);
+
+	/*
+	 * We clear the dedup bit so that zio_free() will actually free the
+	 * space, rather than just decrementing the refcount in the DDT.
+	 */
+	BP_SET_DEDUP(&blk, 0);
+
 	ddt_phys_clear(ddp);
 	zio_free(ddt->ddt_spa, txg, &blk);
 }
@@ -387,7 +394,7 @@ ddt_stat_generate(ddt_t *ddt, ddt_entry_t *dde, ddt_stat_t *dds)
 		if (ddp->ddp_phys_birth == 0)
 			continue;
 
-		for (d = 0; d < SPA_DVAS_PER_BP; d++)
+		for (d = 0; d < DDE_GET_NDVAS(dde); d++)
 			dsize += dva_get_dsize_sync(spa, &ddp->ddp_dva[d]);
 
 		dds->dds_blocks += 1;
@@ -424,7 +431,7 @@ ddt_stat_update(ddt_t *ddt, ddt_entry_t *dde, uint64_t neg)
 
 	ddt_stat_generate(ddt, dde, &dds);
 
-	bucket = highbit(dds.dds_ref_blocks) - 1;
+	bucket = highbit64(dds.dds_ref_blocks) - 1;
 	ASSERT(bucket >= 0);
 
 	ddh = &ddt->ddt_histogram[dde->dde_type][dde->dde_class];
@@ -518,7 +525,7 @@ ddt_get_dedup_stats(spa_t *spa, ddt_stat_t *dds_total)
 {
 	ddt_histogram_t *ddh_total;
 
-	ddh_total = kmem_zalloc(sizeof (ddt_histogram_t), KM_PUSHPAGE);
+	ddh_total = kmem_zalloc(sizeof (ddt_histogram_t), KM_SLEEP);
 	ddt_get_dedup_histogram(spa, ddh_total);
 	ddt_histogram_stat(dds_total, ddh_total);
 	kmem_free(ddh_total, sizeof (ddt_histogram_t));
@@ -545,60 +552,6 @@ ddt_get_pool_dedup_ratio(spa_t *spa)
 	return (dds_total.dds_ref_dsize * 100 / dds_total.dds_dsize);
 }
 
-int
-ddt_ditto_copies_needed(ddt_t *ddt, ddt_entry_t *dde, ddt_phys_t *ddp_willref)
-{
-	spa_t *spa = ddt->ddt_spa;
-	uint64_t total_refcnt = 0;
-	uint64_t ditto = spa->spa_dedup_ditto;
-	int total_copies = 0;
-	int desired_copies = 0;
-	int p;
-
-	for (p = DDT_PHYS_SINGLE; p <= DDT_PHYS_TRIPLE; p++) {
-		ddt_phys_t *ddp = &dde->dde_phys[p];
-		zio_t *zio = dde->dde_lead_zio[p];
-		uint64_t refcnt = ddp->ddp_refcnt;	/* committed refs */
-		if (zio != NULL)
-			refcnt += zio->io_parent_count;	/* pending refs */
-		if (ddp == ddp_willref)
-			refcnt++;			/* caller's ref */
-		if (refcnt != 0) {
-			total_refcnt += refcnt;
-			total_copies += p;
-		}
-	}
-
-	if (ditto == 0 || ditto > UINT32_MAX)
-		ditto = UINT32_MAX;
-
-	if (total_refcnt >= 1)
-		desired_copies++;
-	if (total_refcnt >= ditto)
-		desired_copies++;
-	if (total_refcnt >= ditto * ditto)
-		desired_copies++;
-
-	return (MAX(desired_copies, total_copies) - total_copies);
-}
-
-int
-ddt_ditto_copies_present(ddt_entry_t *dde)
-{
-	ddt_phys_t *ddp = &dde->dde_phys[DDT_PHYS_DITTO];
-	dva_t *dva = ddp->ddp_dva;
-	int copies = 0 - DVA_GET_GANG(dva);
-	int d;
-
-	for (d = 0; d < SPA_DVAS_PER_BP; d++, dva++)
-		if (DVA_IS_VALID(dva))
-			copies++;
-
-	ASSERT(copies >= 0 && copies < SPA_DVAS_PER_BP);
-
-	return (copies);
-}
-
 size_t
 ddt_compress(void *src, uchar_t *dst, size_t s_len, size_t d_len)
 {
@@ -616,7 +569,10 @@ ddt_compress(void *src, uchar_t *dst, size_t s_len, size_t d_len)
 		bcopy(src, dst, s_len);
 	}
 
-	*version = (ZFS_HOST_BYTEORDER & DDT_COMPRESS_BYTEORDER_MASK) | cpfunc;
+	*version = cpfunc;
+	/* CONSTCOND */
+	if (ZFS_HOST_BYTEORDER)
+		*version |= DDT_COMPRESS_BYTEORDER_MASK;
 
 	return (c_len + 1);
 }
@@ -633,7 +589,8 @@ ddt_decompress(uchar_t *src, void *dst, size_t s_len, size_t d_len)
 	else
 		bcopy(src, dst, d_len);
 
-	if ((version ^ ZFS_HOST_BYTEORDER) & DDT_COMPRESS_BYTEORDER_MASK)
+	if (((version & DDT_COMPRESS_BYTEORDER_MASK) != 0) !=
+	    (ZFS_HOST_BYTEORDER != 0))
 		byteswap_uint64_array(dst, d_len);
 }
 
@@ -682,7 +639,7 @@ ddt_alloc(const ddt_key_t *ddk)
 {
 	ddt_entry_t *dde;
 
-	dde = kmem_cache_alloc(ddt_entry_cache, KM_PUSHPAGE);
+	dde = kmem_cache_alloc(ddt_entry_cache, KM_SLEEP);
 	bzero(dde, sizeof (ddt_entry_t));
 	cv_init(&dde->dde_cv, NULL, CV_DEFAULT, NULL);
 
@@ -701,9 +658,8 @@ ddt_free(ddt_entry_t *dde)
 	for (p = 0; p < DDT_PHYS_TYPES; p++)
 		ASSERT(dde->dde_lead_zio[p] == NULL);
 
-	if (dde->dde_repair_data != NULL)
-		zio_buf_free(dde->dde_repair_data,
-		    DDK_GET_PSIZE(&dde->dde_key));
+	if (dde->dde_repair_abd != NULL)
+		abd_free(dde->dde_repair_abd);
 
 	cv_destroy(&dde->dde_cv);
 	kmem_cache_free(ddt_entry_cache, dde);
@@ -754,14 +710,14 @@ ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t add)
 	for (type = 0; type < DDT_TYPES; type++) {
 		for (class = 0; class < DDT_CLASSES; class++) {
 			error = ddt_object_lookup(ddt, type, class, dde);
-			if (error != ENOENT)
+			if (error != ENOENT) {
+				ASSERT0(error);
 				break;
+			}
 		}
 		if (error != ENOENT)
 			break;
 	}
-
-	ASSERT(error == 0 || error == ENOENT);
 
 	ddt_enter(ddt);
 
@@ -831,7 +787,7 @@ ddt_table_alloc(spa_t *spa, enum zio_checksum c)
 {
 	ddt_t *ddt;
 
-	ddt = kmem_cache_alloc(ddt_cache, KM_PUSHPAGE | KM_NODEBUG);
+	ddt = kmem_cache_alloc(ddt_cache, KM_SLEEP);
 	bzero(ddt, sizeof (ddt_t));
 
 	mutex_init(&ddt->ddt_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -934,7 +890,7 @@ ddt_class_contains(spa_t *spa, enum ddt_class max_class, const blkptr_t *bp)
 		return (B_TRUE);
 
 	ddt = spa->spa_ddt[BP_GET_CHECKSUM(bp)];
-	dde = kmem_cache_alloc(ddt_entry_cache, KM_PUSHPAGE);
+	dde = kmem_cache_alloc(ddt_entry_cache, KM_SLEEP);
 
 	ddt_key_fill(&(dde->dde_key), bp);
 
@@ -988,7 +944,7 @@ ddt_repair_done(ddt_t *ddt, ddt_entry_t *dde)
 
 	ddt_enter(ddt);
 
-	if (dde->dde_repair_data != NULL && spa_writeable(ddt->ddt_spa) &&
+	if (dde->dde_repair_abd != NULL && spa_writeable(ddt->ddt_spa) &&
 	    avl_find(&ddt->ddt_repair_tree, dde, &where) == NULL)
 		avl_insert(&ddt->ddt_repair_tree, dde, where);
 	else
@@ -1026,7 +982,7 @@ ddt_repair_entry(ddt_t *ddt, ddt_entry_t *dde, ddt_entry_t *rdde, zio_t *rio)
 			continue;
 		ddt_bp_create(ddt->ddt_checksum, ddk, ddp, &blk);
 		zio_nowait(zio_rewrite(zio, zio->io_spa, 0, &blk,
-		    rdde->dde_repair_data, DDK_GET_PSIZE(rddk), NULL, NULL,
+		    rdde->dde_repair_abd, DDK_GET_PSIZE(rddk), NULL, NULL,
 		    ZIO_PRIORITY_SYNC_WRITE, ZIO_DDT_CHILD_FLAGS(zio), NULL));
 	}
 
@@ -1081,8 +1037,11 @@ ddt_sync_entry(ddt_t *ddt, ddt_entry_t *dde, dmu_tx_t *tx, uint64_t txg)
 			continue;
 		}
 		if (p == DDT_PHYS_DITTO) {
-			if (ddt_ditto_copies_needed(ddt, dde, NULL) == 0)
-				ddt_phys_free(ddt, ddk, ddp, txg);
+			/*
+			 * Note, we no longer create DDT-DITTO blocks, but we
+			 * don't want to leak any written by older software.
+			 */
+			ddt_phys_free(ddt, ddk, ddp, txg);
 			continue;
 		}
 		if (ddp->ddp_refcnt == 0)
@@ -1090,9 +1049,9 @@ ddt_sync_entry(ddt_t *ddt, ddt_entry_t *dde, dmu_tx_t *tx, uint64_t txg)
 		total_refcnt += ddp->ddp_refcnt;
 	}
 
-	if (dde->dde_phys[DDT_PHYS_DITTO].ddp_phys_birth != 0)
-		nclass = DDT_CLASS_DITTO;
-	else if (total_refcnt > 1)
+	/* We do not create new DDT-DITTO blocks. */
+	ASSERT0(dde->dde_phys[DDT_PHYS_DITTO].ddp_phys_birth);
+	if (total_refcnt > 1)
 		nclass = DDT_CLASS_DUPLICATE;
 	else
 		nclass = DDT_CLASS_UNIQUE;
@@ -1151,13 +1110,11 @@ ddt_sync_table(ddt_t *ddt, dmu_tx_t *tx, uint64_t txg)
 	}
 
 	for (type = 0; type < DDT_TYPES; type++) {
-		uint64_t add, count = 0;
+		uint64_t count = 0;
 		for (class = 0; class < DDT_CLASSES; class++) {
 			if (ddt_object_exists(ddt, type, class)) {
 				ddt_object_sync(ddt, type, class, tx);
-				VERIFY(ddt_object_count(ddt, type, class,
-				    &add) == 0);
-				count += add;
+				count += ddt_object_count(ddt, type, class);
 			}
 		}
 		for (class = 0; class < DDT_CLASSES; class++) {
@@ -1173,16 +1130,27 @@ ddt_sync_table(ddt_t *ddt, dmu_tx_t *tx, uint64_t txg)
 void
 ddt_sync(spa_t *spa, uint64_t txg)
 {
+	dsl_scan_t *scn = spa->spa_dsl_pool->dp_scan;
 	dmu_tx_t *tx;
-	zio_t *rio = zio_root(spa, NULL, NULL,
-	    ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE);
-	enum zio_checksum c;
+	zio_t *rio;
 
 	ASSERT(spa_syncing_txg(spa) == txg);
 
 	tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);
 
-	for (c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
+	rio = zio_root(spa, NULL, NULL,
+	    ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE);
+
+	/*
+	 * This function may cause an immediate scan of ddt blocks (see
+	 * the comment above dsl_scan_ddt() for details). We set the
+	 * scan's root zio here so that we can wait for any scan IOs in
+	 * addition to the regular ddt IOs.
+	 */
+	ASSERT3P(scn->scn_zio_root, ==, NULL);
+	scn->scn_zio_root = rio;
+
+	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
 		ddt_t *ddt = spa->spa_ddt[c];
 		if (ddt == NULL)
 			continue;
@@ -1191,6 +1159,7 @@ ddt_sync(spa_t *spa, uint64_t txg)
 	}
 
 	(void) zio_wait(rio);
+	scn->scn_zio_root = NULL;
 
 	dmu_tx_commit(tx);
 }
@@ -1224,8 +1193,3 @@ ddt_walk(spa_t *spa, ddt_bookmark_t *ddb, ddt_entry_t *dde)
 
 	return (SET_ERROR(ENOENT));
 }
-
-#if defined(_KERNEL) && defined(HAVE_SPL)
-module_param(zfs_dedup_prefetch, int, 0644);
-MODULE_PARM_DESC(zfs_dedup_prefetch, "Enable prefetching dedup-ed blks");
-#endif

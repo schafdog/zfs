@@ -75,7 +75,6 @@
 #include <sys/kobj.h>
 #include <sys/time.h>
 #include <sys/zfs_ioctl.h>
-#include <i386/cpuid.h>
 
 int zfs_zevent_len_max = 0;
 int zfs_zevent_cols = 80;
@@ -84,6 +83,14 @@ int zfs_zevent_console = 0;
 static int zevent_len_cur = 0;
 static int zevent_waiters = 0;
 static int zevent_flags = 0;
+
+/*
+ * The EID (Event IDentifier) is used to uniquely tag a zevent when it is
+ * posted.  The posted EIDs are monotonically increasing but not persistent.
+ * They will be reset to the initial value (1) each time the kernel module is
+ * loaded.
+ */
+static uint64_t zevent_eid = 0;
 
 static kmutex_t zevent_lock;
 static list_t zevent_list;
@@ -419,7 +426,7 @@ zfs_zevent_alloc(void)
 {
 	zevent_t *ev;
 
-	ev = kmem_zalloc(sizeof (zevent_t), KM_PUSHPAGE);
+	ev = kmem_zalloc(sizeof (zevent_t), KM_SLEEP);
 	if (ev == NULL)
 		return (NULL);
 
@@ -492,28 +499,51 @@ zfs_zevent_insert(zevent_t *ev)
 }
 
 /*
- * Post a zevent
+ * Post a zevent. The cb will be called when nvl and detector are no longer
+ * needed, i.e.:
+ * - An error happened and a zevent can't be posted. In this case, cb is called
+ *   before zfs_zevent_post() returns.
+ * - The event is being drained and freed.
  */
-void
+int
 zfs_zevent_post(nvlist_t *nvl, nvlist_t *detector, zevent_cb_t *cb)
 {
 	int64_t tv_array[2];
 	timestruc_t tv;
+	uint64_t eid;
 	size_t nvl_size = 0;
 	zevent_t *ev;
+	int error;
+
+	ASSERT(cb != NULL);
 
 	gethrestime(&tv);
 	tv_array[0] = tv.tv_sec;
 	tv_array[1] = tv.tv_nsec;
-	if (nvlist_add_int64_array(nvl, FM_EREPORT_TIME, tv_array, 2)) {
-		atomic_add_64(&erpt_kstat_data.erpt_set_failed.value.ui64, 1);
-		return;
+
+	error = nvlist_add_int64_array(nvl, FM_EREPORT_TIME, tv_array, 2);
+	if (error) {
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
+		goto out;
 	}
 
-	(void) nvlist_size(nvl, &nvl_size, NV_ENCODE_NATIVE);
+	eid = atomic_inc_64_nv(&zevent_eid);
+	error = nvlist_add_uint64(nvl, FM_EREPORT_EID, eid);
+	if (error) {
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
+		goto out;
+	}
+
+	error = nvlist_size(nvl, &nvl_size, NV_ENCODE_NATIVE);
+	if (error) {
+		atomic_inc_64(&erpt_kstat_data.erpt_dropped.value.ui64);
+		goto out;
+	}
+
 	if (nvl_size > ERPT_DATA_SZ || nvl_size == 0) {
-		atomic_add_64(&erpt_kstat_data.erpt_dropped.value.ui64, 1);
-		return;
+		atomic_inc_64(&erpt_kstat_data.erpt_dropped.value.ui64);
+		error = EOVERFLOW;
+		goto out;
 	}
 
 	if (zfs_zevent_console)
@@ -521,21 +551,28 @@ zfs_zevent_post(nvlist_t *nvl, nvlist_t *detector, zevent_cb_t *cb)
 
 	ev = zfs_zevent_alloc();
 	if (ev == NULL) {
-		atomic_add_64(&erpt_kstat_data.erpt_dropped.value.ui64, 1);
-		return;
+		atomic_inc_64(&erpt_kstat_data.erpt_dropped.value.ui64);
+		error = ENOMEM;
+		goto out;
 	}
 
 	ev->ev_nvl = nvl;
 	ev->ev_detector = detector;
 	ev->ev_cb = cb;
+	ev->ev_eid = eid;
 
 	mutex_enter(&zevent_lock);
 	zfs_zevent_insert(ev);
 	cv_broadcast(&zevent_cv);
 	mutex_exit(&zevent_lock);
+
+out:
+	if (error)
+		cb(nvl, detector);
+
+	return (error);
 }
 
-#if 0
 static int
 zfs_zevent_minor_to_state(minor_t minor, zfs_zevent_t **ze)
 {
@@ -545,9 +582,7 @@ zfs_zevent_minor_to_state(minor_t minor, zfs_zevent_t **ze)
 
 	return (0);
 }
-#endif
 
-#if 0
 int
 zfs_zevent_fd_hold(int fd, minor_t *minorp, zfs_zevent_t **ze)
 {
@@ -558,7 +593,7 @@ zfs_zevent_fd_hold(int fd, minor_t *minorp, zfs_zevent_t **ze)
 	if (fp == NULL)
 		return (EBADF);
 
-	*minorp = zfsdev_getminor(fp->f_file);
+    *minorp = zfsdev_getminor(fp->f_file);
 	error = zfs_zevent_minor_to_state(*minorp, ze);
 
 	if (error)
@@ -566,12 +601,11 @@ zfs_zevent_fd_hold(int fd, minor_t *minorp, zfs_zevent_t **ze)
 
 	return (error);
 }
-#endif
 
 void
 zfs_zevent_fd_rele(int fd)
 {
-	//releasef(fd);
+	releasef(fd);
 }
 
 /*
@@ -642,11 +676,77 @@ zfs_zevent_wait(zfs_zevent_t *ze)
 	}
 
 	zevent_waiters++;
-	cv_wait_interruptible(&zevent_cv, &zevent_lock);
+	cv_wait_sig(&zevent_cv, &zevent_lock);
 	if (issig(JUSTLOOKING))
 		error = EINTR;
 
 	zevent_waiters--;
+
+	if (zevent_flags & ZEVENT_SHUTDOWN) {
+		error = ESHUTDOWN;
+	}
+
+  out:
+	mutex_exit(&zevent_lock);
+
+	return (error);
+}
+
+/*
+ * The caller may seek to a specific EID by passing that EID.  If the EID
+ * is still available in the posted list of events the cursor is positioned
+ * there.  Otherwise ENOENT is returned and the cursor is not moved.
+ *
+ * There are two reserved EIDs which may be passed and will never fail.
+ * ZEVENT_SEEK_START positions the cursor at the start of the list, and
+ * ZEVENT_SEEK_END positions the cursor at the end of the list.
+ */
+int
+zfs_zevent_seek(zfs_zevent_t *ze, uint64_t eid)
+{
+	zevent_t *ev;
+	int error = 0;
+
+	mutex_enter(&zevent_lock);
+
+	if (eid == ZEVENT_SEEK_START) {
+		if (ze->ze_zevent)
+			list_remove(&ze->ze_zevent->ev_ze_list, ze);
+
+		ze->ze_zevent = NULL;
+		goto out;
+	}
+
+	if (eid == ZEVENT_SEEK_END) {
+		if (ze->ze_zevent)
+			list_remove(&ze->ze_zevent->ev_ze_list, ze);
+
+		ev = list_head(&zevent_list);
+		if (ev) {
+			ze->ze_zevent = ev;
+			list_insert_head(&ev->ev_ze_list, ze);
+		} else {
+			ze->ze_zevent = NULL;
+		}
+
+		goto out;
+	}
+
+	for (ev = list_tail(&zevent_list); ev != NULL;
+	    ev = list_prev(&zevent_list, ev)) {
+		if (ev->ev_eid == eid) {
+			if (ze->ze_zevent)
+				list_remove(&ze->ze_zevent->ev_ze_list, ze);
+
+			ze->ze_zevent = ev;
+			list_insert_head(&ev->ev_ze_list, ze);
+			break;
+		}
+	}
+
+	if (ev == NULL)
+		error = ENOENT;
+
 out:
 	mutex_exit(&zevent_lock);
 
@@ -681,7 +781,7 @@ zfs_zevent_destroy(zfs_zevent_t *ze)
 static void *
 i_fm_alloc(nv_alloc_t *nva, size_t size)
 {
-	return (kmem_zalloc(size, KM_PUSHPAGE));
+	return (kmem_zalloc(size, KM_SLEEP));
 }
 
 /* ARGSUSED */
@@ -749,7 +849,7 @@ fm_nvlist_create(nv_alloc_t *nva)
 	nv_alloc_t *nvhdl;
 
 	if (nva == NULL) {
-		nvhdl = kmem_zalloc(sizeof (nv_alloc_t), KM_PUSHPAGE);
+		nvhdl = kmem_zalloc(sizeof (nv_alloc_t), KM_SLEEP);
 
 		if (nv_alloc_init(nvhdl, &fm_mem_alloc_ops, NULL, 0) != 0) {
 			kmem_free(nvhdl, sizeof (nv_alloc_t));
@@ -790,6 +890,9 @@ fm_nvlist_destroy(nvlist_t *nvl, int flag)
 	}
 }
 
+#if !defined (__OPTIMIZE__)
+#pragma GCC diagnostic ignored "-Wframe-larger-than="
+#endif
 int
 i_fm_payload_set(nvlist_t *payload, const char *name, va_list ap)
 {
@@ -929,8 +1032,7 @@ fm_payload_set(nvlist_t *payload, ...)
 	va_end(ap);
 
 	if (ret)
-		atomic_add_64(
-		    &erpt_kstat_data.payload_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.payload_set_failed.value.ui64);
 }
 
 /*
@@ -963,24 +1065,24 @@ fm_ereport_set(nvlist_t *ereport, int version, const char *erpt_class,
 	int ret;
 
 	if (version != FM_EREPORT_VERS0) {
-		atomic_add_64(&erpt_kstat_data.erpt_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
 		return;
 	}
 
 	(void) snprintf(ereport_class, FM_MAX_CLASS, "%s.%s",
 	    FM_EREPORT_CLASS, erpt_class);
 	if (nvlist_add_string(ereport, FM_CLASS, ereport_class) != 0) {
-		atomic_add_64(&erpt_kstat_data.erpt_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
 		return;
 	}
 
 	if (nvlist_add_uint64(ereport, FM_EREPORT_ENA, ena)) {
-		atomic_add_64(&erpt_kstat_data.erpt_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
 	}
 
 	if (nvlist_add_nvlist(ereport, FM_EREPORT_DETECTOR,
 	    (nvlist_t *)detector) != 0) {
-		atomic_add_64(&erpt_kstat_data.erpt_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
 	}
 
 	va_start(ap, detector);
@@ -989,7 +1091,7 @@ fm_ereport_set(nvlist_t *ereport, int version, const char *erpt_class,
 	va_end(ap);
 
 	if (ret)
-		atomic_add_64(&erpt_kstat_data.erpt_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.erpt_set_failed.value.ui64);
 }
 
 /*
@@ -1012,19 +1114,19 @@ static int
 fm_fmri_hc_set_common(nvlist_t *fmri, int version, const nvlist_t *auth)
 {
 	if (version != FM_HC_SCHEME_VERSION) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return (0);
 	}
 
 	if (nvlist_add_uint8(fmri, FM_VERSION, version) != 0 ||
 	    nvlist_add_string(fmri, FM_FMRI_SCHEME, FM_FMRI_SCHEME_HC) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return (0);
 	}
 
 	if (auth != NULL && nvlist_add_nvlist(fmri, FM_FMRI_AUTHORITY,
 	    (nvlist_t *)auth) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return (0);
 	}
 
@@ -1056,22 +1158,22 @@ fm_fmri_hc_set(nvlist_t *fmri, int version, const nvlist_t *auth,
 		pairs[i] = fm_nvlist_create(nva);
 		if (nvlist_add_string(pairs[i], FM_FMRI_HC_NAME, name) != 0 ||
 		    nvlist_add_string(pairs[i], FM_FMRI_HC_ID, idstr) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 		}
 	}
 	va_end(ap);
 
 	if (nvlist_add_nvlist_array(fmri, FM_FMRI_HC_LIST, pairs, npairs) != 0)
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 
 	for (i = 0; i < npairs; i++)
 		fm_nvlist_destroy(pairs[i], FM_NVA_RETAIN);
 
 	if (snvl != NULL) {
 		if (nvlist_add_nvlist(fmri, FM_FMRI_HC_SPECIFIC, snvl) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 		}
 	}
 }
@@ -1096,20 +1198,20 @@ fm_fmri_hc_create(nvlist_t *fmri, int version, const nvlist_t *auth,
 	 */
 	if (nvlist_lookup_nvlist_array(bboard, FM_FMRI_HC_LIST, &hcl, &n)
 	    != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	for (i = 0; i < n; i++) {
 		if (nvlist_lookup_string(hcl[i], FM_FMRI_HC_NAME,
 		    &hcname) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 			return;
 		}
 		if (nvlist_lookup_string(hcl[i], FM_FMRI_HC_ID, &hcid) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 			return;
 		}
 
@@ -1121,8 +1223,8 @@ fm_fmri_hc_create(nvlist_t *fmri, int version, const nvlist_t *auth,
 					fm_nvlist_destroy(pairs[j],
 					    FM_NVA_RETAIN);
 			}
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 			return;
 		}
 	}
@@ -1146,8 +1248,8 @@ fm_fmri_hc_create(nvlist_t *fmri, int version, const nvlist_t *auth,
 					fm_nvlist_destroy(pairs[j],
 					    FM_NVA_RETAIN);
 			}
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 			return;
 		}
 	}
@@ -1158,7 +1260,7 @@ fm_fmri_hc_create(nvlist_t *fmri, int version, const nvlist_t *auth,
 	 */
 	if (nvlist_add_nvlist_array(fmri, FM_FMRI_HC_LIST, pairs,
 	    npairs + n) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
@@ -1168,8 +1270,8 @@ fm_fmri_hc_create(nvlist_t *fmri, int version, const nvlist_t *auth,
 
 	if (snvl != NULL) {
 		if (nvlist_add_nvlist(fmri, FM_FMRI_HC_SPECIFIC, snvl) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 			return;
 		}
 	}
@@ -1195,7 +1297,7 @@ fm_fmri_dev_set(nvlist_t *fmri_dev, int version, const nvlist_t *auth,
 	int err = 0;
 
 	if (version != DEV_SCHEME_VERSION0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
@@ -1216,7 +1318,7 @@ fm_fmri_dev_set(nvlist_t *fmri_dev, int version, const nvlist_t *auth,
 		err |= nvlist_add_string(fmri_dev, FM_FMRI_DEV_TGTPTLUN0, tpl0);
 
 	if (err)
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 
 }
 
@@ -1241,35 +1343,35 @@ fm_fmri_cpu_set(nvlist_t *fmri_cpu, int version, const nvlist_t *auth,
 	uint64_t *failedp = &erpt_kstat_data.fmri_set_failed.value.ui64;
 
 	if (version < CPU_SCHEME_VERSION1) {
-		atomic_add_64(failedp, 1);
+		atomic_inc_64(failedp);
 		return;
 	}
 
 	if (nvlist_add_uint8(fmri_cpu, FM_VERSION, version) != 0) {
-		atomic_add_64(failedp, 1);
+		atomic_inc_64(failedp);
 		return;
 	}
 
 	if (nvlist_add_string(fmri_cpu, FM_FMRI_SCHEME,
 	    FM_FMRI_SCHEME_CPU) != 0) {
-		atomic_add_64(failedp, 1);
+		atomic_inc_64(failedp);
 		return;
 	}
 
 	if (auth != NULL && nvlist_add_nvlist(fmri_cpu, FM_FMRI_AUTHORITY,
 	    (nvlist_t *)auth) != 0)
-		atomic_add_64(failedp, 1);
+		atomic_inc_64(failedp);
 
 	if (nvlist_add_uint32(fmri_cpu, FM_FMRI_CPU_ID, cpu_id) != 0)
-		atomic_add_64(failedp, 1);
+		atomic_inc_64(failedp);
 
 	if (cpu_maskp != NULL && nvlist_add_uint8(fmri_cpu, FM_FMRI_CPU_MASK,
 	    *cpu_maskp) != 0)
-		atomic_add_64(failedp, 1);
+		atomic_inc_64(failedp);
 
 	if (serial_idp == NULL || nvlist_add_string(fmri_cpu,
 	    FM_FMRI_CPU_SERIAL_ID, (char *)serial_idp) != 0)
-			atomic_add_64(failedp, 1);
+			atomic_inc_64(failedp);
 }
 
 /*
@@ -1290,49 +1392,47 @@ fm_fmri_mem_set(nvlist_t *fmri, int version, const nvlist_t *auth,
     const char *unum, const char *serial, uint64_t offset)
 {
 	if (version != MEM_SCHEME_VERSION0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (!serial && (offset != (uint64_t)-1)) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (nvlist_add_uint8(fmri, FM_VERSION, version) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (nvlist_add_string(fmri, FM_FMRI_SCHEME, FM_FMRI_SCHEME_MEM) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (auth != NULL) {
 		if (nvlist_add_nvlist(fmri, FM_FMRI_AUTHORITY,
 		    (nvlist_t *)auth) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 		}
 	}
 
 	if (nvlist_add_string(fmri, FM_FMRI_MEM_UNUM, unum) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 	}
 
 	if (serial != NULL) {
 		if (nvlist_add_string_array(fmri, FM_FMRI_MEM_SERIAL_ID,
 		    (char **)&serial, 1) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 		}
-		if (offset != (uint64_t)-1) {
-			if (nvlist_add_uint64(fmri, FM_FMRI_MEM_OFFSET,
-			    offset) != 0) {
-				atomic_add_64(&erpt_kstat_data.
-				    fmri_set_failed.value.ui64, 1);
-			}
+		if (offset != (uint64_t)-1 && nvlist_add_uint64(fmri,
+		    FM_FMRI_MEM_OFFSET, offset) != 0) {
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 		}
 	}
 }
@@ -1342,28 +1442,28 @@ fm_fmri_zfs_set(nvlist_t *fmri, int version, uint64_t pool_guid,
     uint64_t vdev_guid)
 {
 	if (version != ZFS_SCHEME_VERSION0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (nvlist_add_uint8(fmri, FM_VERSION, version) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (nvlist_add_string(fmri, FM_FMRI_SCHEME, FM_FMRI_SCHEME_ZFS) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 		return;
 	}
 
 	if (nvlist_add_uint64(fmri, FM_FMRI_ZFS_POOL, pool_guid) != 0) {
-		atomic_add_64(&erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+		atomic_inc_64(&erpt_kstat_data.fmri_set_failed.value.ui64);
 	}
 
 	if (vdev_guid != 0) {
 		if (nvlist_add_uint64(fmri, FM_FMRI_ZFS_VDEV, vdev_guid) != 0) {
-			atomic_add_64(
-			    &erpt_kstat_data.fmri_set_failed.value.ui64, 1);
+			atomic_inc_64(
+			    &erpt_kstat_data.fmri_set_failed.value.ui64);
 		}
 	}
 }
@@ -1423,12 +1523,9 @@ uint64_t
 fm_ena_generate(uint64_t timestamp, uchar_t format)
 {
 	uint64_t ena;
-    uint32_t cpu_id;
 
 	kpreempt_disable();
-    // FIXME
-    cpuid(&cpu_id);
-	ena = fm_ena_generate_cpu(timestamp, cpu_id, format);
+	ena = fm_ena_generate_cpu(timestamp, getcpuid(), format);
 	kpreempt_enable();
 
 	return (ena);
@@ -1554,16 +1651,5 @@ fm_fini(void)
 		fm_ksp = NULL;
 	}
 }
-
-#if 0
-module_param(zfs_zevent_len_max, int, 0644);
-MODULE_PARM_DESC(zfs_zevent_len_max, "Max event queue length");
-
-module_param(zfs_zevent_cols, int, 0644);
-MODULE_PARM_DESC(zfs_zevent_cols, "Max event column width");
-
-module_param(zfs_zevent_console, int, 0644);
-MODULE_PARM_DESC(zfs_zevent_console, "Log events to the console");
-#endif
 
 #endif /* _KERNEL */

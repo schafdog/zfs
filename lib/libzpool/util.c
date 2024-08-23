@@ -20,6 +20,9 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016 by Delphix. All rights reserved.
+ * Copyright 2017 Jason King
+ * Copyright (c) 2017, Intel Corporation.
  */
 
 #include <assert.h>
@@ -31,6 +34,7 @@
 #include <sys/spa.h>
 #include <sys/fs/zfs.h>
 #include <sys/refcount.h>
+#include <dlfcn.h>
 
 /*
  * Routines needed by more than one client of libzpool.
@@ -67,14 +71,15 @@ static void
 show_vdev_stats(const char *desc, const char *ctype, nvlist_t *nv, int indent)
 {
 	vdev_stat_t *vs;
-	vdev_stat_t v0 = { 0 };
+	vdev_stat_t *v0 = { 0 };
 	uint64_t sec;
 	uint64_t is_log = 0;
 	nvlist_t **child;
 	uint_t c, children;
 	char used[6], avail[6];
 	char rops[6], wops[6], rbytes[6], wbytes[6], rerr[6], werr[6], cerr[6];
-	char *prefix = "";
+
+	v0 = umem_zalloc(sizeof (*v0), UMEM_NOFAIL);
 
 	if (indent == 0 && desc != NULL) {
 		(void) printf("                           "
@@ -84,14 +89,23 @@ show_vdev_stats(const char *desc, const char *ctype, nvlist_t *nv, int indent)
 	}
 
 	if (desc != NULL) {
+		char *suffix = "", *bias = NULL;
+		char bias_suffix[32];
+
 		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_IS_LOG, &is_log);
-
-		if (is_log)
-			prefix = "log ";
-
+		(void) nvlist_lookup_string(nv, ZPOOL_CONFIG_ALLOCATION_BIAS,
+		    &bias);
 		if (nvlist_lookup_uint64_array(nv, ZPOOL_CONFIG_VDEV_STATS,
 		    (uint64_t **)&vs, &c) != 0)
-			vs = &v0;
+			vs = v0;
+
+		if (bias != NULL) {
+			(void) snprintf(bias_suffix, sizeof (bias_suffix),
+			    " (%s)", bias);
+			suffix = bias_suffix;
+		} else if (is_log) {
+			suffix = " (log)";
+		}
 
 		sec = MAX(1, vs->vs_timestamp / NANOSEC);
 
@@ -107,13 +121,14 @@ show_vdev_stats(const char *desc, const char *ctype, nvlist_t *nv, int indent)
 
 		(void) printf("%*s%s%*s%*s%*s %5s %5s %5s %5s %5s %5s %5s\n",
 		    indent, "",
-		    prefix,
-		    (int)(indent+strlen(prefix)-25-(vs->vs_space ? 0 : 12)),
 		    desc,
+		    (int)(indent+strlen(desc)-25-(vs->vs_space ? 0 : 12)),
+		    suffix,
 		    vs->vs_space ? 6 : 0, vs->vs_space ? used : "",
 		    vs->vs_space ? 6 : 0, vs->vs_space ? avail : "",
 		    rops, wops, rbytes, wbytes, rerr, werr, cerr);
 	}
+	free(v0);
 
 	if (nvlist_lookup_nvlist_array(nv, ctype, &child, &children) != 0)
 		return;
@@ -152,4 +167,59 @@ show_pool_stats(spa_t *spa)
 	show_vdev_stats(NULL, ZPOOL_CONFIG_SPARES, nvroot, 0);
 
 	nvlist_free(config);
+}
+
+/*
+ * Sets given global variable in libzpool to given unsigned 32-bit value.
+ * arg: "<variable>=<value>"
+ */
+int
+set_global_var(char *arg)
+{
+	void *zpoolhdl;
+	char *varname = arg, *varval;
+	u_longlong_t val;
+
+#ifndef _LITTLE_ENDIAN
+	/*
+	 * On big endian systems changing a 64-bit variable would set the high
+	 * 32 bits instead of the low 32 bits, which could cause unexpected
+	 * results.
+	 */
+	fprintf(stderr, "Setting global variables is only supported on "
+	    "little-endian systems\n", varname);
+	return (ENOTSUP);
+#endif
+	if ((varval = strchr(arg, '=')) != NULL) {
+		*varval = '\0';
+		varval++;
+		val = strtoull(varval, NULL, 0);
+		if (val > UINT32_MAX) {
+			fprintf(stderr, "Value for global variable '%s' must "
+			    "be a 32-bit unsigned integer\n", varname);
+			return (EOVERFLOW);
+		}
+	} else {
+		return (EINVAL);
+	}
+
+	zpoolhdl = dlopen("libzpool.so", RTLD_LAZY);
+	if (zpoolhdl != NULL) {
+		uint32_t *var;
+		var = dlsym(zpoolhdl, varname);
+		if (var == NULL) {
+			fprintf(stderr, "Global variable '%s' does not exist "
+			    "in libzpool.so\n", varname);
+			return (EINVAL);
+		}
+		*var = (uint32_t)val;
+
+		dlclose(zpoolhdl);
+	} else {
+		fprintf(stderr, "Failed to open libzpool.so to set global "
+		    "variable\n");
+		return (EIO);
+	}
+
+	return (0);
 }

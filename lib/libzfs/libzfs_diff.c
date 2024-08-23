@@ -21,6 +21,9 @@
 
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+ * Copyright (c) 2015, 2017 by Delphix. All rights reserved.
+ * Copyright 2016 Joyent, Inc.
  */
 
 /*
@@ -28,7 +31,7 @@
  */
 #include <ctype.h>
 #include <errno.h>
-//#include <libintl.h>
+#include <libintl.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -52,15 +55,6 @@
 #define	ZDIFF_MODIFIED	'M'
 #define	ZDIFF_REMOVED	'-'
 #define	ZDIFF_RENAMED	'R'
-
-static boolean_t
-do_name_cmp(const char *fpath, const char *tpath)
-{
-	char *fname, *tname;
-	fname = strrchr(fpath, '/') + 1;
-	tname = strrchr(tpath, '/') + 1;
-	return (strcmp(fname, tname) == 0);
-}
 
 typedef struct differ_info {
 	zfs_handle_t *zhp;
@@ -108,11 +102,19 @@ get_stats_for_obj(differ_info_t *di, const char *dsname, uint64_t obj,
 		return (0);
 	}
 
-	if (di->zerr == EPERM) {
+	if (di->zerr == ESTALE) {
+		(void) snprintf(pn, maxlen, "(on_delete_queue)");
+		return (0);
+	} else if (di->zerr == EPERM) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
 		    dgettext(TEXT_DOMAIN,
 		    "The sys_config privilege or diff delegated permission "
 		    "is needed\nto discover path names"));
+		return (-1);
+	} else if (di->zerr == EACCES) {
+		(void) snprintf(di->errbuf, sizeof (di->errbuf),
+		    dgettext(TEXT_DOMAIN,
+		    "Key must be loaded to discover path names"));
 		return (-1);
 	} else {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
@@ -128,7 +130,7 @@ get_stats_for_obj(differ_info_t *di, const char *dsname, uint64_t obj,
  *
  * Prints a file name out a character at a time.  If the character is
  * not in the range of what we consider "printable" ASCII, display it
- * as an escaped 3-digit octal value.  ASCII values less than a space
+ * as an escaped 4-digit octal value.  ASCII values less than a space
  * are all control characters and we declare the upper end as the
  * DELete character.  This also is the last 7-bit ASCII character.
  * We choose to treat all 8-bit ASCII as not printable for this
@@ -137,11 +139,14 @@ get_stats_for_obj(differ_info_t *di, const char *dsname, uint64_t obj,
 static void
 stream_bytes(FILE *fp, const char *string)
 {
-	while (*string) {
-		if (*string > ' ' && *string != '\\' && *string < '\177')
-			(void) fprintf(fp, "%c", *string++);
-		else
-			(void) fprintf(fp, "\\%03o", (unsigned char)*string++);
+	char c;
+
+	while ((c = *string++) != '\0') {
+		if (c > ' ' && c != '\\' && c < '\177') {
+			(void) fprintf(fp, "%c", c);
+		} else {
+			(void) fprintf(fp, "\\%04o", (uint8_t)c);
+		}
 	}
 }
 
@@ -257,7 +262,6 @@ static int
 write_inuse_diffs_one(FILE *fp, differ_info_t *di, uint64_t dobj)
 {
 	struct zfs_stat fsb, tsb;
-	boolean_t same_name;
 	mode_t fmode, tmode;
 	char fobjname[MAXPATHLEN], tobjname[MAXPATHLEN];
 	int fobjerr, tobjerr;
@@ -318,7 +322,6 @@ write_inuse_diffs_one(FILE *fp, differ_info_t *di, uint64_t dobj)
 
 	if (fmode != tmode && fsb.zs_gen == tsb.zs_gen)
 		tsb.zs_gen++;	/* Force a generational difference */
-	same_name = do_name_cmp(fobjname, tobjname);
 
 	/* Simple modification or no change */
 	if (fsb.zs_gen == tsb.zs_gen) {
@@ -329,7 +332,7 @@ write_inuse_diffs_one(FILE *fp, differ_info_t *di, uint64_t dobj)
 		if (change) {
 			print_link_change(fp, di, change,
 			    change > 0 ? fobjname : tobjname, &tsb);
-		} else if (same_name) {
+		} else if (strcmp(fobjname, tobjname) == 0) {
 			print_file(fp, di, ZDIFF_MODIFIED, fobjname, &tsb);
 		} else {
 			print_rename(fp, di, fobjname, tobjname, &tsb);
@@ -475,7 +478,7 @@ differ(void *arg)
 	if (err)
 		return ((void *)-1);
 	if (di->zerr) {
-		ASSERT(di->zerr == EINVAL);
+		ASSERT(di->zerr == EPIPE);
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
 		    dgettext(TEXT_DOMAIN,
 		    "Internal error: bad data from diff IOCTL"));
@@ -496,7 +499,13 @@ find_shares_object(differ_info_t *di)
 	if (stat(fullpath, &sb) != 0) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
 		    dgettext(TEXT_DOMAIN, "Cannot stat %s"), fullpath);
-		return (zfs_error(di->zhp->zfs_hdl, EZFS_DIFF, di->errbuf));
+#ifndef __APPLE__
+		/*
+		 * Unsure why zfs diff cares about the shares directory, but we
+		 * do not have this just yet under OSX.
+		 */
+			return (zfs_error(di->zhp->zfs_hdl, EZFS_DIFF, di->errbuf));
+#endif
 	}
 
 	di->shares = (uint64_t)sb.st_ino;
@@ -610,7 +619,7 @@ get_snapshot_names(differ_info_t *di, const char *fromsnap,
 		 * not the same dataset name, might be okay if
 		 * tosnap is a clone of a fromsnap descendant.
 		 */
-		char origin[ZFS_MAXNAMELEN];
+		char origin[ZFS_MAX_DATASET_NAME_LEN];
 		zprop_source_t src;
 		zfs_handle_t *zhp;
 
@@ -620,9 +629,12 @@ get_snapshot_names(differ_info_t *di, const char *fromsnap,
 
 		zhp = zfs_open(hdl, di->ds, ZFS_TYPE_FILESYSTEM);
 		while (zhp != NULL) {
-			(void) zfs_prop_get(zhp, ZFS_PROP_ORIGIN,
-			    origin, sizeof (origin), &src, NULL, 0, B_FALSE);
-
+			if (zfs_prop_get(zhp, ZFS_PROP_ORIGIN, origin,
+			    sizeof (origin), &src, NULL, 0, B_FALSE) != 0) {
+				(void) zfs_close(zhp);
+				zhp = NULL;
+				break;
+			}
 			if (strncmp(origin, fromsnap, fsnlen) == 0)
 				break;
 

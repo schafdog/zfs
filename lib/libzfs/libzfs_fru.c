@@ -26,7 +26,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
-//#include <libintl.h>
+#include <libintl.h>
 //#include <link.h>
 #include <pthread.h>
 #include <strings.h>
@@ -284,7 +284,7 @@ libzfs_fru_refresh(libzfs_handle_t *hdl)
 
 	if (hdl->libzfs_fru_hash == NULL &&
 	    (hdl->libzfs_fru_hash =
-	    calloc(ZFS_FRU_HASH_SIZE * sizeof (void *), 1)) == NULL)
+	    calloc(ZFS_FRU_HASH_SIZE, sizeof (void *))) == NULL)
 		return;
 
 	/*

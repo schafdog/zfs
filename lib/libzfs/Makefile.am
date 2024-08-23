@@ -1,6 +1,8 @@
 include $(top_srcdir)/config/Rules.am
 
 AUTOMAKE_OPTIONS = subdir-objects
+libzfs_pcdir = $(datarootdir)/pkgconfig
+libzfs_pc_DATA = libzfs.pc libzfs_core.pc
 
 DEFAULT_INCLUDES += \
 	-I$(top_srcdir)/include \
@@ -11,6 +13,7 @@ lib_LTLIBRARIES = libzfs.la
 libzfs_la_SOURCES = \
 	libzfs_changelist.c \
 	libzfs_config.c \
+	libzfs_crypto.c \
 	libzfs_dataset.c \
 	libzfs_diff.c \
 	libzfs_fru.c \
@@ -30,4 +33,4 @@ libzfs_la_LIBADD = \
 	$(top_builddir)/lib/libzpool/libzpool.la
 
 libzfs_la_LIBADD += -lm -ldl $(LIBBLKID)
-libzfs_la_LDFLAGS = -version-info 2:0:0
+libzfs_la_LDFLAGS = -version-info 2:0:0 -framework IOKit

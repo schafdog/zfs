@@ -45,6 +45,7 @@ extern "C" {
 #include <sys/cmn_err.h>
 #include <sys/kmem.h>
 #include <sys/taskq.h>
+#include <sys/taskq_impl.h>
 #include <sys/buf.h>
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -62,25 +63,33 @@ extern "C" {
 #include <sys/time.h>
 #include <vm/seg_kmem.h>
 #include <sys/zone.h>
+#include <sys/sdt.h>
 #include <sys/zfs_debug.h>
+#include <sys/zfs_delay.h>
 #include <sys/fm/fs/zfs.h>
 #include <sys/sunddi.h>
 #include <sys/ctype.h>
 #include <sys/disp.h>
 #include <sys/atomic.h>
+#include <sys/sysevent.h>
+#include <sys/sysevent/eventdefs.h>
+#include <zfs_comutil.h>
+
 //#include <linux/dcache_compat.h>
 
-typedef enum kmem_cbrc {
-	KMEM_CBRC_YES,
-	KMEM_CBRC_NO,
-	KMEM_CBRC_LATER,
-	KMEM_CBRC_DONT_NEED,
-	KMEM_CBRC_DONT_KNOW
-} kmem_cbrc_t;
+// There are to be found in spl/include/sys/kmem.h
+//typedef enum kmem_cbrc {
+//	KMEM_CBRC_YES,
+//	KMEM_CBRC_NO,
+//	KMEM_CBRC_LATER,
+//	KMEM_CBRC_DONT_NEED,
+//	KMEM_CBRC_DONT_KNOW
+//} kmem_cbrc_t;
 
 #define	KMC_KMEM		0x0
 #define	KMC_VMEM		0x0
 
+#define noinline
 
 typedef struct dirent dirent_t;
 typedef struct direntry dirent64_t;
@@ -101,23 +110,15 @@ typedef struct direntry dirent64_t;
 /* Pre-faulting pages not yet supported for Mac OS X */
 #define zfs_prefault_write(n, uio)
 
-extern u_int32_t k_maczfs_debug_stalk;
-
-
 #define SEC_TO_TICK(sec)        ((sec) * hz)
 #define MSEC_TO_TICK(msec)      ((msec) / (MILLISEC / hz))
 #define USEC_TO_TICK(usec)      ((usec) / (MICROSEC / hz))
 #define NSEC_TO_TICK(usec)      ((usec) / (NANOSEC / hz))
 
-#define zfs_sleep_until(wakeup)                                         \
-    do {                                                                \
-        hrtime_t delta = wakeup - gethrtime();                          \
-        struct timespec ts;                                             \
-        ts.tv_sec = delta / NANOSEC;                                    \
-        ts.tv_nsec = delta % NANOSEC;                                   \
-        msleep(NULL, NULL, PWAIT, "zfs_sleep_until", &ts);              \
-    } while (0)
 
+#define IS_INDEXABLE(arg) (sizeof(arg[0]))
+#define IS_ARRAY(arg) (IS_INDEXABLE(arg) && (((void *) &arg) == ((void *) arg)))
+#define ARRAY_SIZE(arr) (IS_ARRAY(arr) ? (sizeof(arr) / sizeof(arr[0])) : 0)
 
 #endif /* _KERNEL */
 

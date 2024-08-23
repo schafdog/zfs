@@ -31,6 +31,9 @@
  * - LZ4 homepage : http://fastcompression.blogspot.com/p/lz4.html
  * - LZ4 source repository : http://code.google.com/p/lz4/
  */
+/*
+ * Copyright (c) 2016 by Delphix. All rights reserved.
+ */
 
 #include <sys/zfs_context.h>
 
@@ -63,10 +66,10 @@ lz4_compress_zfs(void *s_start, void *d_start, size_t s_len,
 		return (s_len);
 
 	/*
-	 * Encode the compresed buffer size at the start. We'll need this in
-	 * decompression to counter the effects of padding which might be
-	 * added to the compressed buffer and which, if unhandled, would
-	 * confuse the hell out of our decompression function.
+	 * The exact compressed size is needed by the decompression routine,
+	 * so it is stored at the start of the buffer. Note that this may be
+	 * less than the compressed block size, which is rounded up to a
+	 * multiple of 1<<ashift.
 	 */
 	*(uint32_t *)dest = BE_32(bufsiz);
 
@@ -87,7 +90,7 @@ lz4_decompress_zfs(void *s_start, void *d_start, size_t s_len,
 
 	/*
 	 * Returns 0 on success (decompression function returned non-negative)
-	 * and non-zero on failure (decompression function returned negative.
+	 * and non-zero on failure (decompression function returned negative).
 	 */
 	return (LZ4_uncompress_unknownOutputSize(&src[sizeof (bufsiz)],
 	    d_start, bufsiz, d_len) < 0);
@@ -115,6 +118,8 @@ lz4_decompress_zfs(void *s_start, void *d_start, size_t s_len,
  * 		writes beyond dest + osize, and is therefore protected
  * 		against malicious data packets.
  * 	note : destination buffer must be already allocated
+ *	note : real_LZ4_uncompress() is not used in ZFS so its code
+ *	       is not present here.
  *
  * Advanced Functions
  *
@@ -195,9 +200,7 @@ lz4_decompress_zfs(void *s_start, void *d_start, size_t s_len,
  */
 
 /* 32 or 64 bits ? */
-#if (defined(__x86_64__) || defined(__x86_64) || defined(__amd64__) || \
-    defined(__amd64) || defined(__ppc64__) || defined(_WIN64) || \
-    defined(__LP64__) || defined(_LP64))
+#if defined(_LP64)
 #define	LZ4_ARCH64 1
 #else
 #define	LZ4_ARCH64 0
@@ -207,17 +210,14 @@ lz4_decompress_zfs(void *s_start, void *d_start, size_t s_len,
  * Little Endian or Big Endian?
  * Note: overwrite the below #define if you know your architecture endianess.
  */
-#if (defined(__BIG_ENDIAN__) || defined(__BIG_ENDIAN) || \
-	defined(_BIG_ENDIAN) || defined(_ARCH_PPC) || defined(__PPC__) || \
-	defined(__PPC) || defined(PPC) || defined(__powerpc__) || \
-	defined(__powerpc) || defined(powerpc) || \
-	((defined(__BYTE_ORDER__)&&(__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__))))
+#if defined(_BIG_ENDIAN)
 #define	LZ4_BIG_ENDIAN 1
 #else
 /*
  * Little Endian assumed. PDP Endian and other very rare endian format
  * are unsupported.
  */
+#undef LZ4_BIG_ENDIAN
 #endif
 
 /*
@@ -841,7 +841,7 @@ real_LZ4_compress(const char *source, char *dest, int isize, int osize)
 	int result;
 
 	ASSERT(lz4_cache != NULL);
-	ctx = kmem_cache_alloc(lz4_cache, KM_PUSHPAGE);
+	ctx = kmem_cache_alloc(lz4_cache, KM_SLEEP);
 
 	/*
 	 * out of kernel memory, gently fall through - this will disable
@@ -871,6 +871,9 @@ real_LZ4_compress(const char *source, char *dest, int isize, int osize)
  *	it will never read outside of the input buffer. A corrupted input
  *	will produce an error result, a negative int, indicating the position
  *	of the error within input stream.
+ *
+ * Note[2]: real_LZ4_uncompress(), referred to above, is not used in ZFS so
+ *	its code is not present here.
  */
 
 static int
@@ -907,6 +910,9 @@ LZ4_uncompress_unknownOutputSize(const char *source, char *dest, int isize,
 		}
 		/* copy literals */
 		cpy = op + length;
+		/* CORNER-CASE: cpy might overflow. */
+		if (cpy < op)
+			goto _output_error;	/* cpy was overflowed, bail! */
 		if ((cpy > oend - COPYLENGTH) ||
 		    (ip + length > iend - COPYLENGTH)) {
 			if (cpy > oend)

@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
  */
 
 #ifndef _SYS_ZFS_DEBUG_H
@@ -39,23 +39,30 @@ extern "C" {
 #endif
 
 /*
- * ZFS debugging - Always enabled for user space builds.
+ * ZFS debugging
  */
-
-#if !defined(ZFS_DEBUG) && !defined(_KERNEL)
-#define	ZFS_DEBUG
+#if defined(DEBUG) || !defined(_KERNEL)
+#ifndef ZFS_DEBUG
+#define ZFS_DEBUG 1
+#endif
 #endif
 
-extern int zfs_flags;
-extern int zfs_recover;
+extern uint64_t zfs_flags;
+extern uint64_t zfs_recover;
+extern boolean_t zfs_free_leak_on_eio;
 
-#define	ZFS_DEBUG_DPRINTF	(1<<0)
-#define	ZFS_DEBUG_DBUF_VERIFY	(1<<1)
-#define	ZFS_DEBUG_DNODE_VERIFY	(1<<2)
-#define	ZFS_DEBUG_SNAPNAMES	(1<<3)
-#define	ZFS_DEBUG_MODIFY	(1<<4)
-#define	ZFS_DEBUG_SPA		(1<<5)
-#define	ZFS_DEBUG_ZIO_FREE	(1<<6)
+#define	ZFS_DEBUG_DPRINTF		(1 << 0)
+#define	ZFS_DEBUG_DBUF_VERIFY		(1 << 1)
+#define	ZFS_DEBUG_DNODE_VERIFY		(1 << 2)
+#define	ZFS_DEBUG_SNAPNAMES		(1 << 3)
+#define	ZFS_DEBUG_MODIFY		(1 << 4)
+/* 1<<5 was previously used, try not to reuse */
+#define	ZFS_DEBUG_ZIO_FREE		(1 << 6)
+#define	ZFS_DEBUG_HISTOGRAM_VERIFY	(1 << 7)
+#define	ZFS_DEBUG_METASLAB_VERIFY	(1 << 8)
+#define	ZFS_DEBUG_SET_ERROR		(1 << 9)
+#define	ZFS_DEBUG_INDIRECT_REMAP	(1 << 10)
+#define	ZFS_DEBUG_TRIM			(1 << 11)
 
 /*
  * Always log zfs debug messages to the spl debug subsystem as SS_USER1.
@@ -65,9 +72,9 @@ extern int zfs_recover;
 #if defined(_KERNEL)
 
 #include <spl-debug.h>
-#define	dprintf(...)                                                   \
+#define	dprintf(...)										   \
 	if (zfs_flags & ZFS_DEBUG_DPRINTF)                             \
-		__SDEBUG(NULL, SS_USER1, SD_DPRINTF, __VA_ARGS__)
+		cmn_err(CE_NOTE, __VA_ARGS__)
 
 /*
  * When zfs is running is user space the debugging is always enabled.

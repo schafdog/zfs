@@ -90,6 +90,16 @@ extern	in_port_t ntohs(in_port_t);
 #endif	/* !defined(_XPG4_2) || defined(__EXTENSIONS__) || defined(_XPG5) */
 #endif
 
+/* 10.8 is lacking in htonll */
+#if !defined(htonll)
+#define htonll(x)       __DARWIN_OSSwapInt64(x)
+#endif
+
+#if !defined(ntohll)
+#define ntohll(x)       __DARWIN_OSSwapInt64(x)
+#endif
+
+
 #if !defined(_XPG4_2) || defined(__EXTENSIONS__)
 
 /*
@@ -126,6 +136,32 @@ extern	in_port_t ntohs(in_port_t);
 #define	BE_16(x)	BSWAP_16(x)
 #define	BE_32(x)	BSWAP_32(x)
 #define	BE_64(x)	BSWAP_64(x)
+#endif
+
+#ifdef _BIG_ENDIAN
+static __inline__ uint64_t
+htonll(uint64_t n) {
+	return (n);
+}
+
+static __inline__ uint64_t
+ntohll(uint64_t n) {
+	return (n);
+}
+
+#else
+#if 0
+static __inline__ uint64_t
+htonll(uint64_t n) {
+	return _OSSwapInt64(n);
+}
+
+static __inline__ uint64_t
+ntohll(uint64_t n) {
+	return _OSSwapInt64(n);
+}
+#endif
+
 #endif
 
 /*

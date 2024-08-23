@@ -10,6 +10,9 @@ libzfs_core_la_SOURCES = \
 	libzfs_core.c
 
 libzfs_core_la_LIBADD = \
-	$(top_builddir)/lib/libnvpair/libnvpair.la
+	$(top_builddir)/lib/libnvpair/libnvpair.la \
+	$(top_builddir)/lib/libuutil/libuutil.la
 
 libzfs_core_la_LDFLAGS = -version-info 1:0:0
+
+EXTRA_DIST = $(USER_C)

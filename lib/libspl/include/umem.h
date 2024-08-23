@@ -37,6 +37,8 @@
  * https://labs.omniti.com/trac/portableumem
  */
 
+#include <sys/sysmacros.h>
+
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -82,7 +84,7 @@ typedef struct umem_cache {
 static inline void *
 umem_alloc(size_t size, int flags)
 {
-	void *ptr;
+	void *ptr = NULL;
 
 	do {
 		ptr = malloc(size);
@@ -94,8 +96,8 @@ umem_alloc(size_t size, int flags)
 static inline void *
 umem_alloc_aligned(size_t size, size_t align, int flags)
 {
-	void *ptr;
-	int rc;
+	void *ptr = NULL;
+	int rc = EINVAL;
 
 	do {
 		rc = posix_memalign(&ptr, align, size);
@@ -115,7 +117,7 @@ umem_alloc_aligned(size_t size, size_t align, int flags)
 static inline void *
 umem_zalloc(size_t size, int flags)
 {
-	void *ptr;
+	void *ptr = NULL;
 
 	ptr = umem_alloc(size, flags);
 	if (ptr)
@@ -168,7 +170,7 @@ umem_cache_destroy(umem_cache_t *cp)
 static inline void *
 umem_cache_alloc(umem_cache_t *cp, int flags)
 {
-	void *ptr;
+	void *ptr = NULL;
 
 	if (cp->cache_align != 0)
 		ptr = umem_alloc_aligned(
@@ -189,6 +191,11 @@ umem_cache_free(umem_cache_t *cp, void *ptr)
 		cp->cache_destructor(ptr, cp->cache_private);
 
 	umem_free(ptr, cp->cache_bufsize);
+}
+
+static inline void
+umem_cache_reap_now(umem_cache_t *cp)
+{
 }
 
 #ifdef  __cplusplus

@@ -131,11 +131,7 @@ zfs_onexit_fd_hold(int fd, minor_t *minorp)
     if (fp == NULL)
         return EBADF;
 
-#ifdef __APPLE__
-    *minorp = zfsdev_getminor(current_proc());
-#else
     *minorp = zfsdev_getminor(fp->f_file);
-#endif
     return (zfs_onexit_minor_to_state(*minorp, &zo));
 }
 
@@ -160,7 +156,7 @@ zfs_onexit_add_cb(minor_t minor, void (*func)(void *), void *data,
 	if (error)
 		return (error);
 
-	ap = kmem_alloc(sizeof (zfs_onexit_action_node_t), KM_PUSHPAGE);
+	ap = kmem_alloc(sizeof (zfs_onexit_action_node_t), KM_SLEEP);
 	list_link_init(&ap->za_link);
 	ap->za_func = func;
 	ap->za_data = data;

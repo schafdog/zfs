@@ -33,6 +33,8 @@
 #ifndef _SYS_ZFS_CONTEXT_H
 #define	_SYS_ZFS_CONTEXT_H
 
+#include <stddef.h>
+
 #define	vnevent_create(vp, ct)			do { } while (0)
 #define	vnevent_link(vp, ct)			do { } while (0)
 #define	vnevent_remove(vp, dvp, name, ct)	do { } while (0)
@@ -52,24 +54,20 @@
 
 #include <sys/zfs_context_userland.h>
 
-#endif /* _KERNEL */
+#endif
 
 #define noinline
-
 #define EBADE EBADMACHO
+#define ENOTACTIVE ENOPOLICY
+#define ECHRNG EMULTIHOP
+#define EREMOTEIO ENOLINK
 
 #ifndef MAX_UPL_TRANSFER
 #define MAX_UPL_TRANSFER 256
 #endif
-
-#define      getcomm()                       "unknown"
-
-struct zfs_mount_args {
-    const char      *fspec;         /* block special device to mount */
-    uint64_t     flags;
-};
-
-
+#define getcomm() "unknown"
 #define ZVOL_ROOT "/var/run"
+
+#define MNTTYPE_ZFS_SUBTYPE ('Z'<<24|'F'<<16|'S'<<8)
 
 #endif	/* _SYS_ZFS_CONTEXT_H */

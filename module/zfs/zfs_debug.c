@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -29,23 +29,8 @@
 list_t zfs_dbgmsgs;
 int zfs_dbgmsg_size;
 kmutex_t zfs_dbgmsgs_lock;
-int zfs_dbgmsg_maxsize = 1<<20; /* 1MB */
+int zfs_dbgmsg_maxsize = 4<<20; /* 4MB */
 #endif
-
-/*
- * Enable various debugging features.
- */
-int zfs_flags = 0;
-
-/*
- * zfs_recover can be set to nonzero to attempt to recover from
- * otherwise-fatal errors, typically caused by on-disk corruption.  When
- * set, calls to zfs_panic_recover() will turn into warning messages.
- * This should only be used as a last resort, as it typically results
- * in leaked space, or worse.
- */
-int zfs_recover = 0;
-
 
 void
 zfs_panic_recover(const char *fmt, ...)
@@ -71,16 +56,6 @@ zfs_dbgmsg_init(void)
 	    offsetof(zfs_dbgmsg_t, zdm_node));
 	mutex_init(&zfs_dbgmsgs_lock, NULL, MUTEX_DEFAULT, NULL);
 #endif
-
-	if (zfs_flags == 0) {
-#if defined(_KERNEL)
-		zfs_flags = ZFS_DEBUG_DPRINTF;
-		spl_debug_set_mask(spl_debug_get_mask() | SD_DPRINTF);
-		spl_debug_set_subsys(spl_debug_get_subsys() | SS_USER1);
-#else
-		zfs_flags = ~ZFS_DEBUG_DPRINTF;
-#endif /* _KERNEL */
-	}
 }
 
 void
@@ -105,8 +80,23 @@ zfs_dbgmsg_fini(void)
  * echo ::zfs_dbgmsg | mdb -k
  *
  * Monitor these messages by running:
- * 	dtrace -q -n 'zfs-dbgmsg{printf("%s\n", stringof(arg0))}'
+ * dtrace -qn 'zfs-dbgmsg{printf("%s\n", stringof(arg0))}'
+ *
+ * When used with libzpool, monitor with:
+ * dtrace -qn 'zfs$pid::zfs_dbgmsg:probe1{printf("%s\n", copyinstr(arg1))}'
  */
+
+#ifdef __APPLE__
+/*
+ * MacOS X's dtrace doesn't handle the PROBEs, so
+ * we have a utility function that we can watch with
+ * sudo dtrace -qn 'zfs_dbgmsg_mac:entry{printf("%s\n", stringof(arg0));}'
+ */
+
+noinline char *zfs_dbgmsg_mac(char *str) __attribute__((noinline)) __attribute__((optnone));
+
+#endif
+
 void
 zfs_dbgmsg(const char *fmt, ...)
 {
@@ -130,6 +120,10 @@ zfs_dbgmsg(const char *fmt, ...)
 	va_end(adx);
 
 	DTRACE_PROBE1(zfs__dbgmsg, char *, zdm->zdm_msg);
+
+#ifdef __APPLE__
+	(void) zfs_dbgmsg_mac(zdm->zdm_msg);
+#endif
 
 	mutex_enter(&zfs_dbgmsgs_lock);
 	list_insert_tail(&zfs_dbgmsgs, zdm);
@@ -155,12 +149,14 @@ zfs_dbgmsg_print(const char *tag)
 		(void) printf("%s\n", zdm->zdm_msg);
 	mutex_exit(&zfs_dbgmsgs_lock);
 }
+
+#ifdef __APPLE__
+noinline char *
+zfs_dbgmsg_mac(char *str)
+	__attribute__((noinline))
+	__attribute((optnone))
+{
+	return(str);
+}
 #endif
-
-#if defined(_KERNEL)
-module_param(zfs_flags, int, 0644);
-MODULE_PARM_DESC(zfs_flags, "Set additional debugging flags");
-
-module_param(zfs_recover, int, 0644);
-MODULE_PARM_DESC(zfs_recover, "Set to attempt to recover from fatal errors");
-#endif /* _KERNEL */
+#endif

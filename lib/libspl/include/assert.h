@@ -58,6 +58,13 @@ __assert_c99(const char *expr, const char *file, int line, const char *func)
 #define	ASSERT(x)	((void)0)
 #endif
 
+static inline int
+assfail(const char *buf, const char *file, int line)
+{
+	__assert(buf, file, line);
+	return (0);
+}
+
 /* BEGIN CSTYLED */
 #define	VERIFY3_IMPL(LEFT, OP, RIGHT, TYPE) do { \
 	const TYPE __left = (TYPE)(LEFT); \
@@ -72,23 +79,45 @@ __assert_c99(const char *expr, const char *file, int line, const char *func)
 } while (0)
 /* END CSTYLED */
 
+#define	VERIFY3B(x, y, z)	VERIFY3_IMPL(x, y, z, boolean_t)
 #define	VERIFY3S(x, y, z)	VERIFY3_IMPL(x, y, z, int64_t)
 #define	VERIFY3U(x, y, z)	VERIFY3_IMPL(x, y, z, uint64_t)
 #define	VERIFY3P(x, y, z)	VERIFY3_IMPL(x, y, z, uintptr_t)
 #define	VERIFY0(x)		VERIFY3_IMPL(x, ==, 0, uint64_t)
 
 #ifndef DEBUG
+
+/* Compile time assert */
+#define	CTASSERT_GLOBAL(x)		_CTASSERT(x, __LINE__)
+#define	CTASSERT(x)			{ _CTASSERT(x, __LINE__); }
+#define	_CTASSERT(x, y)			__CTASSERT(x, y)
+#define	__CTASSERT(x, y)						\
+	typedef char __attribute__((unused))				\
+	__compile_time_assertion__ ## y[(x) ? 1 : -1]
+
+#define	ASSERT3B(x, y, z)	((void)0)
 #define	ASSERT3S(x, y, z)	((void)0)
 #define	ASSERT3U(x, y, z)	((void)0)
 #define	ASSERT3P(x, y, z)	((void)0)
 #define	ASSERT0(x)		((void)0)
 #define	ASSERTV(x)
+#define	IMPLY(A, B)		((void)0)
+#define	EQUIV(A, B)		((void)0)
 #else
+#define	CTASSERT(x)			((void)0)
+#define	ASSERT3B(x, y, z)	VERIFY3S(x, y, z)
 #define	ASSERT3S(x, y, z)	VERIFY3S(x, y, z)
 #define	ASSERT3U(x, y, z)	VERIFY3U(x, y, z)
 #define	ASSERT3P(x, y, z)	VERIFY3P(x, y, z)
 #define	ASSERT0(x)		VERIFY0(x)
 #define	ASSERTV(x)		x
-#endif  /* DEBUG */
+#define	IMPLY(A, B) \
+	((void)(((!(A)) || (B)) || \
+	    assfail("(" #A ") implies (" #B ")", __FILE__, __LINE__)))
+#define	EQUIV(A, B) \
+	((void)((!!(A) == !!(B)) || \
+	    assfail("(" #A ") is equivalent to (" #B ")", __FILE__, __LINE__)))
+
+#endif  /* NDEBUG */
 
 #endif  /* _LIBSPL_ASSERT_H */

@@ -32,6 +32,7 @@
 #define	_ZFS_CTLDIR_H
 
 #include <sys/vnode.h>
+#include <sys/pathname.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_znode.h>
 
@@ -95,6 +96,9 @@ extern int zfsctl_shares_lookup(struct vnode *dip, char *name,
 extern void zfsctl_init(void);
 extern void zfsctl_fini(void);
 
+extern int zfsctl_umount_snapshots(vfs_t *vfsp, int fflags, cred_t *cr);
+extern void zfs_ereport_snapshot_post(const char *subclass, spa_t *spa, const char *name);
+
 /*
  * These inodes numbers are reserved for the .zfs control directory.
  * It is important that they be no larger that 48-bits because only
@@ -103,19 +107,9 @@ extern void zfsctl_fini(void);
  * with the objects which are assigned monotonically by the dmu.
  */
 
-#ifdef __LINUX__
-//#ifdef __APPLE__
 #define	ZFSCTL_INO_ROOT		0x0000FFFFFFFFFFFFULL
 #define	ZFSCTL_INO_SHARES	0x0000FFFFFFFFFFFEULL
 #define	ZFSCTL_INO_SNAPDIR	0x0000FFFFFFFFFFFDULL
 #define	ZFSCTL_INO_SNAPDIRS	0x0000FFFFFFFFFFFCULL
-
-#define	ZFSCTL_EXPIRE_SNAPSHOT	300
-#else
-
-#define	ZFSCTL_INO_ROOT		0x3
-#define	ZFSCTL_INO_SNAPDIR	0x4
-#define	ZFSCTL_INO_SHARES	0x5
-#endif
 
 #endif	/* _ZFS_CTLDIR_H */

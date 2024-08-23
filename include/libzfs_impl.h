@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2013 by Delphix. All rights reserved.
  */
 
 #ifndef	_LIBZFS_IMPL_H
@@ -40,8 +40,8 @@
 #include <libzfs_core.h>
 
 #define	MOUNT_POINT_COOKIE		".autodiskmounted"
-#define	MOUNT_POINT_CUSTOMICON		".VolumeIcon.icns"
-#define	CUSTOM_ICON_PATH		"/System/Library/Filesystems/zfs.fs/Contents/Resources/VolumeIcon.icns"
+#define	MOUNT_POINT_CUSTOM_ICON		".VolumeIcon.icns"
+#define	CUSTOM_ICON_PATH		KERNEL_MODPREFIX "/zfs.kext/Contents/Resources/VolumeIcon.icns"
 
 #if defined(HAVE_LIBTOPO)
 #include <fm/libtopo.h>
@@ -88,6 +88,7 @@ struct libzfs_handle {
 	libzfs_fru_t *libzfs_fru_list;
 #endif /* HAVE_LIBTOPO */
 	char libzfs_chassis_id[256];
+	boolean_t libzfs_prop_debug;
 };
 
 #define	ZFSSHARE_MISS	0x01	/* Didn't find entry in cache */
@@ -95,7 +96,7 @@ struct libzfs_handle {
 struct zfs_handle {
 	libzfs_handle_t *zfs_hdl;
 	zpool_handle_t *zpool_hdl;
-	char zfs_name[ZFS_MAXNAMELEN];
+	char zfs_name[ZFS_MAX_DATASET_NAME_LEN];
 	zfs_type_t zfs_type; /* type including snapshot */
 	zfs_type_t zfs_head_type; /* type excluding snapshot */
 	dmu_objset_stats_t zfs_dmustats;
@@ -116,7 +117,7 @@ struct zfs_handle {
 struct zpool_handle {
 	libzfs_handle_t *zpool_hdl;
 	zpool_handle_t *zpool_next;
-	char zpool_name[ZPOOL_MAXNAMELEN];
+	char zpool_name[ZFS_MAX_DATASET_NAME_LEN];
 	int zpool_state;
 	size_t zpool_config_size;
 	nvlist_t *zpool_config;
@@ -128,7 +129,8 @@ struct zpool_handle {
 typedef enum {
 	PROTO_NFS = 0,
 	PROTO_SMB = 1,
-	PROTO_END = 2
+	PROTO_AFP = 2,
+	PROTO_END = 3
 } zfs_share_proto_t;
 
 /*
@@ -138,8 +140,11 @@ typedef enum {
 typedef enum {
 	SHARED_NOT_SHARED = 0x0,
 	SHARED_NFS = 0x2,
-	SHARED_SMB = 0x4
+	SHARED_SMB = 0x4,
+	SHARED_AFP = 0x8
 } zfs_share_type_t;
+
+#define	CONFIG_BUF_MINSIZE	262144
 
 int zfs_error(libzfs_handle_t *, int, const char *);
 int zfs_error_fmt(libzfs_handle_t *, int, const char *, ...);
@@ -196,6 +201,8 @@ int create_parents(libzfs_handle_t *, char *, int);
 boolean_t isa_child_of(const char *dataset, const char *parent);
 
 zfs_handle_t *make_dataset_handle(libzfs_handle_t *, const char *);
+zfs_handle_t *make_bookmark_handle(zfs_handle_t *, const char *,
+    nvlist_t *props);
 
 int zpool_open_silent(libzfs_handle_t *, const char *, zpool_handle_t **);
 

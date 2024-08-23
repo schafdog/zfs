@@ -54,9 +54,17 @@
 #define	MSEC2NSEC(m)    ((hrtime_t)(m) * (NANOSEC / MILLISEC))
 #endif
 
+#ifndef USEC2NSEC
+#define     USEC2NSEC(u)    ((hrtime_t)(u) * (NANOSEC / MICROSEC))
+#endif
+
+
 #ifndef NSEC2MSEC
 #define	NSEC2MSEC(n)    ((n) / (NANOSEC / MILLISEC))
 #endif
+
+#define        NSEC2SEC(n)     ((n) / (NANOSEC / SEC))
+#define        SEC2NSEC(m)     ((hrtime_t)(m) * (NANOSEC / SEC))
 
 extern hrtime_t gethrtime(void);
 extern void gethrestime(timestruc_t *);

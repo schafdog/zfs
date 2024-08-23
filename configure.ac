@@ -40,41 +40,37 @@ AC_CONFIG_MACRO_DIR([config])
 AC_CANONICAL_SYSTEM
 AM_MAINTAINER_MODE
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
-AM_INIT_AUTOMAKE([$ZFS_META_NAME], [$ZFS_META_VERSION])
+AM_INIT_AUTOMAKE([subdir-objects])
 AC_CONFIG_HEADERS([zfs_config.h], [
 	(mv zfs_config.h zfs_config.h.tmp &&
 	awk -f ${ac_srcdir}/config/config.awk zfs_config.h.tmp >zfs_config.h &&
 	rm zfs_config.h.tmp) || exit 1])
 
 AC_PROG_INSTALL
-dnl save $CFLAGS since AC_PROG_CC likes to insert "-g -O2"
-dnl if $CFLAGS is blank
-cflags_save="$CFLAGS"
-AC_PROG_CC
-AC_PROG_CXX
-CFLAGS="$cflags_save"
+AC_PROG_CC(clang)
+AC_PROG_CXX(clang++)
+AC_PROG_OBJC(clang)
+AC_PROG_OBJCXX(clang++)
 AC_PROG_LIBTOOL
 AM_PROG_CC_C_O
 AM_PROG_AS
+AM_PROG_CC_C_O
 
 ZFS_AC_LICENSE
 ZFS_AC_PACKAGE
 ZFS_AC_CONFIG
 ZFS_AC_DEBUG
 ZFS_AC_DEBUG_DMU_TX
-
-# during dev
-if test "x$ac_cv_prog_gcc" = xyes ; then
-   CFLAGS="$CFLAGS -g "
-fi
+ZFS_AC_BOOT
 
 AC_CONFIG_FILES([
 	Makefile
-	dracut/Makefile
-	dracut/90zfs/Makefile
 	udev/Makefile
 	udev/rules.d/Makefile
 	etc/Makefile
+	etc/launchd/Makefile
+	etc/launchd/daemons/Makefile
+	etc/launchd/launchd.d/Makefile
 	etc/init.d/Makefile
 	etc/zfs/Makefile
 	etc/systemd/Makefile
@@ -85,6 +81,7 @@ AC_CONFIG_FILES([
 	man/man5/Makefile
 	man/man8/Makefile
 	lib/Makefile
+	lib/libdiskmgt/Makefile
 	lib/libspl/Makefile
 	lib/libspl/asm-generic/Makefile
 	lib/libspl/asm-i386/Makefile
@@ -99,54 +96,66 @@ AC_CONFIG_FILES([
 	lib/libspl/include/util/Makefile
 	lib/libavl/Makefile
 	lib/libefi/Makefile
+	lib/libicp/Makefile
 	lib/libnvpair/Makefile
 	lib/libunicode/Makefile
 	lib/libuutil/Makefile
 	lib/libzpool/Makefile
+	lib/libzfs/libzfs.pc
+	lib/libzfs/libzfs_core.pc
 	lib/libzfs/Makefile
 	lib/libzfs_core/Makefile
 	lib/libshare/Makefile
 	cmd/Makefile
+	cmd/zconfigd/Makefile
 	cmd/zdb/Makefile
 	cmd/zhack/Makefile
 	cmd/zfs/Makefile
+	cmd/zfs_util/Makefile
 	cmd/zinject/Makefile
 	cmd/zpool/Makefile
 	cmd/zstreamdump/Makefile
+	cmd/zsysctl/Makefile
 	cmd/ztest/Makefile
 	cmd/zpios/Makefile
-	cmd/mount_zfs/Makefile
 	cmd/fsck_zfs/Makefile
 	cmd/zvol_id/Makefile
 	cmd/vdev_id/Makefile
 	cmd/arcstat/Makefile
 	cmd/dbufstat/Makefile
+	cmd/arc_summary/Makefile
+	cmd/zed/Makefile
+	cmd/InvariantDisks/Makefile
+	cmd/InvariantDisks/InvariantDisks/Makefile
+	contrib/Makefile
+	contrib/bash_completion.d/Makefile
+	contrib/dracut/Makefile
+	contrib/dracut/90zfs/Makefile
+	contrib/initramfs/Makefile
 	module/Makefile
-	module/avl/Makefile
-	module/nvpair/Makefile
-	module/unicode/Makefile
-	module/zcommon/Makefile
 	module/zfs/Makefile
-	module/zpios/Makefile
 	include/Makefile
 	include/sys/Makefile
 	include/sys/fs/Makefile
 	include/sys/fm/Makefile
 	include/sys/fm/fs/Makefile
+	include/sys/crypto/Makefile
+	include/sys/lua/Makefile
 	scripts/Makefile
 	scripts/zpios-profile/Makefile
 	scripts/zpios-test/Makefile
 	scripts/zpool-config/Makefile
 	scripts/common.sh
 	rpm/Makefile
-	rpm/fedora/Makefile
-	rpm/fedora/zfs.spec
-	rpm/fedora/zfs-kmod.spec
-	rpm/fedora/zfs-dkms.spec
+	rpm/redhat/Makefile
+	rpm/redhat/zfs.spec
+	rpm/redhat/zfs-kmod.spec
+	rpm/redhat/zfs-dkms.spec
 	rpm/generic/Makefile
 	rpm/generic/zfs.spec
 	rpm/generic/zfs-kmod.spec
 	rpm/generic/zfs-dkms.spec
+	zfs_bundle/Makefile
 	zfs-script-config.sh
 	zfs.release
 ])

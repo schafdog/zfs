@@ -21,7 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Portions Copyright 2011 Martin Matuska
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -32,6 +32,7 @@
 #include <sys/dsl_pool.h>
 #include <sys/dsl_scan.h>
 #include <sys/callb.h>
+#include <sys/trace_txg.h>
 
 //#define dprintf printf
 
@@ -123,7 +124,7 @@ txg_init(dsl_pool_t *dp, uint64_t txg)
 	int c;
 	bzero(tx, sizeof (tx_state_t));
 
-	tx->tx_cpu = vmem_zalloc(max_ncpus * sizeof (tx_cpu_t), KM_SLEEP);
+	tx->tx_cpu = kmem_zalloc(max_ncpus * sizeof (tx_cpu_t), KM_SLEEP);
 
 	for (c = 0; c < max_ncpus; c++) {
 		int i;
@@ -160,7 +161,7 @@ txg_fini(dsl_pool_t *dp)
 	tx_state_t *tx = &dp->dp_tx;
 	int c;
 
-	ASSERT(tx->tx_threads == 0);
+	ASSERT0(tx->tx_threads);
 
 	mutex_destroy(&tx->tx_sync_lock);
 
@@ -184,7 +185,7 @@ txg_fini(dsl_pool_t *dp)
 	if (tx->tx_commit_cb_taskq != NULL)
 		taskq_destroy(tx->tx_commit_cb_taskq);
 
-	vmem_free(tx->tx_cpu, max_ncpus * sizeof (tx_cpu_t));
+	kmem_free(tx->tx_cpu, max_ncpus * sizeof (tx_cpu_t));
 
 	bzero(tx, sizeof (tx_state_t));
 }
@@ -199,12 +200,14 @@ txg_sync_start(dsl_pool_t *dp)
 
 	mutex_enter(&tx->tx_sync_lock);
 
-	ASSERT(tx->tx_threads == 0);
+	dprintf("pool %p\n", dp);
+
+	ASSERT0(tx->tx_threads);
 
 	tx->tx_threads = 2;
 
 	tx->tx_quiesce_thread = thread_create(NULL, 0, txg_quiesce_thread,
-	    dp, 0, &p0, TS_RUN, minclsyspri);
+	    dp, 0, &p0, TS_RUN, defclsyspri);
 
 	/*
 	 * The sync thread can need a larger-than-default stack size on
@@ -212,7 +215,7 @@ txg_sync_start(dsl_pool_t *dp)
 	 * scrub_visitbp() recursion.
 	 */
 	tx->tx_sync_thread = thread_create(NULL, 32<<10, txg_sync_thread,
-	    dp, 0, &p0, TS_RUN, minclsyspri);
+	    dp, 0, &p0, TS_RUN, defclsyspri);
 
 	mutex_exit(&tx->tx_sync_lock);
 }
@@ -241,10 +244,10 @@ txg_thread_wait(tx_state_t *tx, callb_cpr_t *cpr, kcondvar_t *cv, clock_t time)
 	CALLB_CPR_SAFE_BEGIN(cpr);
 
 	if (time)
-		(void) cv_timedwait_interruptible(cv, &tx->tx_sync_lock,
+		(void) cv_timedwait_sig(cv, &tx->tx_sync_lock,
 		    ddi_get_lbolt() + time);
 	else
-		cv_wait_interruptible(cv, &tx->tx_sync_lock);
+		cv_wait_sig(cv, &tx->tx_sync_lock);
 
 	CALLB_CPR_SAFE_END(cpr, &tx->tx_sync_lock);
 }
@@ -260,7 +263,7 @@ txg_sync_stop(dsl_pool_t *dp)
 	/*
 	 * Finish off any work in progress.
 	 */
-	ASSERT(tx->tx_threads == 2);
+	ASSERT3U(tx->tx_threads, ==, 2);
 
 	/*
 	 * We need to ensure that we've vacated the deferred space_maps.
@@ -272,7 +275,7 @@ txg_sync_stop(dsl_pool_t *dp)
 	 */
 	mutex_enter(&tx->tx_sync_lock);
 
-	ASSERT(tx->tx_threads == 2);
+	ASSERT3U(tx->tx_threads, ==, 2);
 
 	tx->tx_exiting = 1;
 
@@ -443,11 +446,11 @@ txg_dispatch_callbacks(dsl_pool_t *dp, uint64_t txg)
 			 * Commit callback taskq hasn't been created yet.
 			 */
 			tx->tx_commit_cb_taskq = taskq_create("tx_commit_cb",
-			    100, minclsyspri, max_ncpus, INT_MAX,
-			    TASKQ_THREADS_CPU_PCT | TASKQ_PREPOPULATE);
+			    max_ncpus, defclsyspri, max_ncpus, max_ncpus * 2,
+			    TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
 		}
 
-		cb_list = kmem_alloc(sizeof (list_t), KM_PUSHPAGE);
+		cb_list = kmem_alloc(sizeof (list_t), KM_SLEEP);
 		list_create(cb_list, sizeof (dmu_tx_callback_t),
 		    offsetof(dmu_tx_callback_t, dcb_node));
 
@@ -469,18 +472,42 @@ txg_wait_callbacks(dsl_pool_t *dp)
 	tx_state_t *tx = &dp->dp_tx;
 
 	if (tx->tx_commit_cb_taskq != NULL)
-		taskq_wait(tx->tx_commit_cb_taskq);
+		taskq_wait_outstanding(tx->tx_commit_cb_taskq, 0);
+}
+static boolean_t
+txg_is_syncing(dsl_pool_t *dp)
+{
+	tx_state_t *tx = &dp->dp_tx;
+	ASSERT(MUTEX_HELD(&tx->tx_sync_lock));
+	return (tx->tx_syncing_txg != 0);
+}
+
+static boolean_t
+txg_is_quiescing(dsl_pool_t *dp)
+{
+	tx_state_t *tx = &dp->dp_tx;
+	ASSERT(MUTEX_HELD(&tx->tx_sync_lock));
+	return (tx->tx_quiescing_txg != 0);
+}
+
+static boolean_t
+txg_has_quiesced_to_sync(dsl_pool_t *dp)
+{
+	tx_state_t *tx = &dp->dp_tx;
+	ASSERT(MUTEX_HELD(&tx->tx_sync_lock));
+	return (tx->tx_quiesced_txg != 0);
 }
 
 static void
 txg_sync_thread(void *arg)
 {
 	dsl_pool_t *dp = (dsl_pool_t *)arg;
+
 	spa_t *spa = dp->dp_spa;
 	tx_state_t *tx = &dp->dp_tx;
 	callb_cpr_t cpr;
 	vdev_stat_t *vs1, *vs2;
-	uint64_t start, delta;
+	clock_t start, delta;
 
 #ifdef _KERNEL
 	/*
@@ -493,13 +520,14 @@ txg_sync_thread(void *arg)
 
 	txg_thread_enter(tx, &cpr);
 
-	vs1 = kmem_alloc(sizeof (vdev_stat_t), KM_PUSHPAGE);
-	vs2 = kmem_alloc(sizeof (vdev_stat_t), KM_PUSHPAGE);
+	vs1 = kmem_alloc(sizeof (vdev_stat_t), KM_SLEEP);
+	vs2 = kmem_alloc(sizeof (vdev_stat_t), KM_SLEEP);
 
 	start = delta = 0;
 	for (;;) {
-		uint64_t timer, timeout;
+		clock_t timer, timeout;
 		uint64_t txg;
+		uint64_t ndirty;
 
 		timeout = zfs_txg_timeout * hz;
 
@@ -512,7 +540,7 @@ txg_sync_thread(void *arg)
 		while (!dsl_scan_active(dp->dp_scan) &&
 		    !tx->tx_exiting && timer > 0 &&
 		    tx->tx_synced_txg >= tx->tx_sync_txg_waiting &&
-		    tx->tx_quiesced_txg == 0 &&
+		    !txg_has_quiesced_to_sync(dp) &&
 		    dp->dp_dirty_total < zfs_dirty_data_sync) {
 			dprintf("waiting; tx_synced=%llu waiting=%llu dp=%p\n",
 			    tx->tx_synced_txg, tx->tx_sync_txg_waiting, dp);
@@ -525,7 +553,7 @@ txg_sync_thread(void *arg)
 		 * Wait until the quiesce thread hands off a txg to us,
 		 * prompting it to do so if necessary.
 		 */
-		while (!tx->tx_exiting && tx->tx_quiesced_txg == 0) {
+		while (!tx->tx_exiting && !txg_has_quiesced_to_sync(dp)) {
 			if (tx->tx_quiesce_txg_waiting < tx->tx_open_txg+1)
 				tx->tx_quiesce_txg_waiting = tx->tx_open_txg+1;
 			cv_broadcast(&tx->tx_quiesce_more_cv);
@@ -538,13 +566,16 @@ txg_sync_thread(void *arg)
 			txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
 		}
 
+		spa_config_enter(spa, SCL_ALL, FTAG, RW_READER);
 		vdev_get_stats(spa->spa_root_vdev, vs1);
+		spa_config_exit(spa, SCL_ALL, FTAG);
 
 		/*
 		 * Consume the quiesced txg which has been handed off to
 		 * us.  This may cause the quiescing thread to now be
 		 * able to quiesce another txg, so we must signal it.
 		 */
+		ASSERT(tx->tx_quiesced_txg != 0);
 		txg = tx->tx_quiesced_txg;
 		tx->tx_quiesced_txg = 0;
 		tx->tx_syncing_txg = txg;
@@ -557,6 +588,7 @@ txg_sync_thread(void *arg)
 
 		spa_txg_history_set(spa, txg, TXG_STATE_WAIT_FOR_SYNC,
 		    gethrtime());
+		ndirty = dp->dp_dirty_pertxg[txg & TXG_MASK];
 
 		start = ddi_get_lbolt();
 		spa_sync(spa, txg);
@@ -573,13 +605,15 @@ txg_sync_thread(void *arg)
 		 */
 		txg_dispatch_callbacks(dp, txg);
 
+		spa_config_enter(spa, SCL_ALL, FTAG, RW_READER);
 		vdev_get_stats(spa->spa_root_vdev, vs2);
+		spa_config_exit(spa, SCL_ALL, FTAG);
 		spa_txg_history_set_io(spa, txg,
 		    vs2->vs_bytes[ZIO_TYPE_READ]-vs1->vs_bytes[ZIO_TYPE_READ],
 		    vs2->vs_bytes[ZIO_TYPE_WRITE]-vs1->vs_bytes[ZIO_TYPE_WRITE],
 		    vs2->vs_ops[ZIO_TYPE_READ]-vs1->vs_ops[ZIO_TYPE_READ],
 		    vs2->vs_ops[ZIO_TYPE_WRITE]-vs1->vs_ops[ZIO_TYPE_WRITE],
-		    dp->dp_dirty_pertxg[txg & TXG_MASK]);
+		    ndirty);
 		spa_txg_history_set(spa, txg, TXG_STATE_SYNCED, gethrtime());
 	}
 }
@@ -605,7 +639,7 @@ txg_quiesce_thread(void *arg)
 		 */
 		while (!tx->tx_exiting &&
 		    (tx->tx_open_txg >= tx->tx_quiesce_txg_waiting ||
-		    tx->tx_quiesced_txg != 0))
+		    txg_has_quiesced_to_sync(dp)))
 			txg_thread_wait(tx, &cpr, &tx->tx_quiesce_more_cv, 0);
 
 		if (tx->tx_exiting)
@@ -615,6 +649,8 @@ txg_quiesce_thread(void *arg)
 		dprintf("txg=%llu quiesce_txg=%llu sync_txg=%llu\n",
 		    txg, tx->tx_quiesce_txg_waiting,
 		    tx->tx_sync_txg_waiting);
+		tx->tx_quiescing_txg = txg;
+
 		mutex_exit(&tx->tx_sync_lock);
 		txg_quiesce(dp, txg);
 		mutex_enter(&tx->tx_sync_lock);
@@ -623,6 +659,7 @@ txg_quiesce_thread(void *arg)
 		 * Hand this txg off to the sync thread.
 		 */
 		dprintf("quiesce done, handing off txg %llu\n", txg);
+		tx->tx_quiescing_txg = 0;
 		tx->tx_quiesced_txg = txg;
 		DTRACE_PROBE2(txg__quiesced, dsl_pool_t *, dp, uint64_t, txg);
 		cv_broadcast(&tx->tx_sync_more_cv);
@@ -671,7 +708,7 @@ txg_wait_synced(dsl_pool_t *dp, uint64_t txg)
 	ASSERT(!dsl_pool_config_held(dp));
 
 	mutex_enter(&tx->tx_sync_lock);
-	ASSERT(tx->tx_threads == 2);
+	ASSERT3U(tx->tx_threads, ==, 2);
 	if (txg == 0)
 		txg = tx->tx_open_txg + TXG_DEFER_SIZE;
 	if (tx->tx_sync_txg_waiting < txg)
@@ -688,18 +725,22 @@ txg_wait_synced(dsl_pool_t *dp, uint64_t txg)
 	mutex_exit(&tx->tx_sync_lock);
 }
 
+/*
+ * Wait for the specified open transaction group.  Set should_quiesce
+ * when the current open txg should be quiesced immediately.
+ */
 void
-txg_wait_open(dsl_pool_t *dp, uint64_t txg)
+txg_wait_open(dsl_pool_t *dp, uint64_t txg, boolean_t should_quiesce)
 {
 	tx_state_t *tx = &dp->dp_tx;
 
 	ASSERT(!dsl_pool_config_held(dp));
 
 	mutex_enter(&tx->tx_sync_lock);
-	ASSERT(tx->tx_threads == 2);
+	ASSERT3U(tx->tx_threads, ==, 2);
 	if (txg == 0)
 		txg = tx->tx_open_txg + 1;
-	if (tx->tx_quiesce_txg_waiting < txg)
+	if (tx->tx_quiesce_txg_waiting < txg && should_quiesce)
 		tx->tx_quiesce_txg_waiting = txg;
 	dprintf("txg=%llu quiesce_txg=%llu sync_txg=%llu\n",
 	    txg, tx->tx_quiesce_txg_waiting, tx->tx_sync_txg_waiting);
@@ -722,7 +763,8 @@ txg_kick(dsl_pool_t *dp)
 	ASSERT(!dsl_pool_config_held(dp));
 
 	mutex_enter(&tx->tx_sync_lock);
-	if (tx->tx_syncing_txg == 0 &&
+	if (!txg_is_syncing(dp) &&
+	    !txg_is_quiescing(dp) &&
 	    tx->tx_quiesce_txg_waiting <= tx->tx_open_txg &&
 	    tx->tx_sync_txg_waiting <= tx->tx_synced_txg &&
 	    tx->tx_quiesced_txg <= tx->tx_synced_txg) {
@@ -779,6 +821,26 @@ boolean_t
 txg_list_empty(txg_list_t *tl, uint64_t txg)
 {
 	return (tl->tl_head[txg & TXG_MASK] == NULL);
+}
+
+/*
+ * Returns true if all txg lists are empty.
+ *
+ * Warning: this is inherently racy (an item could be added immediately
+ * after this function returns). We don't bother with the lock because
+ * it wouldn't change the semantics.
+ */
+boolean_t
+txg_all_lists_empty(txg_list_t *tl)
+{
+	int i;
+
+	for (i = 0; i < TXG_SIZE; i++) {
+		if (!txg_list_empty(tl, i)) {
+			return (B_FALSE);
+		}
+	}
+	return (B_TRUE);
 }
 
 /*
@@ -845,6 +907,8 @@ txg_list_remove(txg_list_t *tl, uint64_t txg)
 
 	mutex_enter(&tl->tl_lock);
 	if ((tn = tl->tl_head[t]) != NULL) {
+		ASSERT(tn->tn_member[t]);
+		ASSERT(tn->tn_next[t] == NULL || tn->tn_next[t]->tn_member[t]);
 		p = (char *)tn - tl->tl_offset;
 		tl->tl_head[t] = tn->tn_next[t];
 		tn->tn_next[t] = NULL;
@@ -912,25 +976,3 @@ txg_list_next(txg_list_t *tl, void *p, uint64_t txg)
 
 	return (tn == NULL ? NULL : (char *)tn - tl->tl_offset);
 }
-
-#if defined(_KERNEL) && defined(HAVE_SPL)
-#if 0
-EXPORT_SYMBOL(txg_init);
-EXPORT_SYMBOL(txg_fini);
-EXPORT_SYMBOL(txg_sync_start);
-EXPORT_SYMBOL(txg_sync_stop);
-EXPORT_SYMBOL(txg_hold_open);
-EXPORT_SYMBOL(txg_rele_to_quiesce);
-EXPORT_SYMBOL(txg_rele_to_sync);
-EXPORT_SYMBOL(txg_register_callbacks);
-EXPORT_SYMBOL(txg_delay);
-EXPORT_SYMBOL(txg_wait_synced);
-EXPORT_SYMBOL(txg_wait_open);
-EXPORT_SYMBOL(txg_wait_callbacks);
-EXPORT_SYMBOL(txg_stalled);
-EXPORT_SYMBOL(txg_sync_waiting);
-
-module_param(zfs_txg_timeout, int, 0644);
-MODULE_PARM_DESC(zfs_txg_timeout, "Max seconds worth of delta per txg");
-#endif
-#endif

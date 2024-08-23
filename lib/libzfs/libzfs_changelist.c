@@ -24,9 +24,10 @@
  * Use is subject to license terms.
  *
  * Portions Copyright 2007 Ramprakash Jelari
+ * Copyright (c) 2014, 2015 by Delphix. All rights reserved.
  */
 
-//#include <libintl.h>
+#include <libintl.h>
 #include <libuutil.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -97,7 +98,8 @@ changelist_prefix(prop_changelist_t *clp)
 	int ret = 0;
 
 	if (clp->cl_prop != ZFS_PROP_MOUNTPOINT &&
-	    clp->cl_prop != ZFS_PROP_SHARESMB)
+	    clp->cl_prop != ZFS_PROP_SHARESMB &&
+	    clp->cl_prop != ZFS_PROP_SHAREAFP)
 		return (0);
 
 	for (cn = uu_list_first(clp->cl_list); cn != NULL;
@@ -131,6 +133,9 @@ changelist_prefix(prop_changelist_t *clp)
 			case ZFS_PROP_SHARESMB:
 				(void) zfs_unshare_smb(cn->cn_handle, NULL);
 				break;
+			case ZFS_PROP_SHAREAFP:
+				(void) zfs_unshare_afp(cn->cn_handle, NULL);
+				break;
 			default:
 				break;
 			}
@@ -159,6 +164,7 @@ changelist_postfix(prop_changelist_t *clp)
 	char shareopts[ZFS_MAXPROPLEN];
 	int errors = 0;
 	libzfs_handle_t *hdl;
+	char mounted_propbuf[ZFS_MAXPROPLEN];
 
 	/*
 	 * If we're changing the mountpoint, attempt to destroy the underlying
@@ -196,7 +202,9 @@ changelist_postfix(prop_changelist_t *clp)
 
 		boolean_t sharenfs;
 		boolean_t sharesmb;
+		boolean_t shareafp;
 		boolean_t mounted;
+		boolean_t needs_key;
 
 		/*
 		 * If we are in the global zone, but this dataset is exported
@@ -227,26 +235,41 @@ changelist_postfix(prop_changelist_t *clp)
 		    shareopts, sizeof (shareopts), NULL, NULL, 0,
 		    B_FALSE) == 0) && (strcmp(shareopts, "off") != 0));
 
+		shareafp = ((zfs_prop_get(cn->cn_handle, ZFS_PROP_SHAREAFP,
+		    shareopts, sizeof (shareopts), NULL, NULL, 0,
+		    B_FALSE) == 0) && (strcmp(shareopts, "off") != 0));
+
+		needs_key = (zfs_prop_get_int(cn->cn_handle,
+		    ZFS_PROP_KEYSTATUS) == ZFS_KEYSTATUS_UNAVAILABLE);
+
 		mounted = zfs_is_mounted(cn->cn_handle, NULL);
 
-		if (!mounted && (cn->cn_mounted ||
-		    ((sharenfs || sharesmb || clp->cl_waslegacy) &&
+		if (!mounted && !needs_key && (cn->cn_mounted ||
+		    ((sharenfs || sharesmb || shareafp || clp->cl_waslegacy) &&
 		    (zfs_prop_get_int(cn->cn_handle,
 		    ZFS_PROP_CANMOUNT) == ZFS_CANMOUNT_ON)))) {
-#if __APPLE__
-            /* Do not mount snapshots. On OSX zfs_mount allow snapshots to
-             * be mounted, so we need to explicitly skip them here */
-            if ((clp->cl_gflags & CL_GATHER_SKIP_SNAPSHOT) &&
-                zfs_get_type(cn->cn_handle) != ZFS_TYPE_SNAPSHOT) {
+#ifdef __APPLE__
+			/*
+			 * Do not mount snapshots. On OS X zfs_mount allows
+			 * snapshots to be mounted, so we need to explicitly
+			 * skip them here.
+			 */
+			if (!(clp->cl_gflags & CL_GATHER_SKIP_SNAPSHOT) ||
+			    zfs_get_type(cn->cn_handle) != ZFS_TYPE_SNAPSHOT) {
 #endif
-                if (zfs_mount(cn->cn_handle, NULL, 0) != 0)
-                    errors++;
-                else {
-                    mounted = TRUE;
-                    printf("Mount successful\n");
-                }
-#if __APPLE__
-            }
+				if (zfs_mount(cn->cn_handle, NULL, 0) != 0)
+					errors++;
+				else {
+					mounted = TRUE;
+					if (zfs_prop_get(cn->cn_handle,
+					    ZFS_PROP_MOUNTED, mounted_propbuf,
+					    sizeof (mounted_propbuf), NULL,
+					    NULL, 0, B_FALSE) == 0 &&
+					    strcmp(mounted_propbuf, "yes") == 0)
+						printf("Mount successful\n");
+				}
+#ifdef __APPLE__
+			}
 #endif
 		}
 
@@ -263,6 +286,10 @@ changelist_postfix(prop_changelist_t *clp)
 			errors += zfs_share_smb(cn->cn_handle);
 		else if (cn->cn_shared || clp->cl_waslegacy)
 			errors += zfs_unshare_smb(cn->cn_handle, NULL);
+		if (shareafp && mounted)
+			errors += zfs_share_afp(cn->cn_handle);
+		else if (cn->cn_shared || clp->cl_waslegacy)
+			errors += zfs_unshare_afp(cn->cn_handle, NULL);
 	}
 
 	return (errors ? -1 : 0);
@@ -298,7 +325,7 @@ void
 changelist_rename(prop_changelist_t *clp, const char *src, const char *dst)
 {
 	prop_changenode_t *cn;
-	char newname[ZFS_MAXNAMELEN];
+	char newname[ZFS_MAX_DATASET_NAME_LEN];
 
 	for (cn = uu_list_first(clp->cl_list); cn != NULL;
 	    cn = uu_list_next(clp->cl_list, cn)) {
@@ -332,7 +359,8 @@ changelist_unshare(prop_changelist_t *clp, zfs_share_proto_t *proto)
 	int ret = 0;
 
 	if (clp->cl_prop != ZFS_PROP_SHARENFS &&
-	    clp->cl_prop != ZFS_PROP_SHARESMB)
+	    clp->cl_prop != ZFS_PROP_SHARESMB &&
+	    clp->cl_prop != ZFS_PROP_SHAREAFP)
 		return (0);
 
 	for (cn = uu_list_first(clp->cl_list); cn != NULL;
@@ -558,7 +586,7 @@ changelist_gather(zfs_handle_t *zhp, zfs_prop_t prop, int gather_flags,
 	 */
 	if (prop == ZFS_PROP_NAME || prop == ZFS_PROP_ZONED ||
 	    prop == ZFS_PROP_MOUNTPOINT || prop == ZFS_PROP_SHARENFS ||
-	    prop == ZFS_PROP_SHARESMB) {
+	    prop == ZFS_PROP_SHARESMB || prop == ZFS_PROP_SHAREAFP) {
 
 		if (zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT,
 		    property, sizeof (property),
@@ -622,7 +650,8 @@ changelist_gather(zfs_handle_t *zhp, zfs_prop_t prop, int gather_flags,
 
 	if (clp->cl_prop != ZFS_PROP_MOUNTPOINT &&
 	    clp->cl_prop != ZFS_PROP_SHARENFS &&
-	    clp->cl_prop != ZFS_PROP_SHARESMB)
+	    clp->cl_prop != ZFS_PROP_SHARESMB &&
+	    clp->cl_prop != ZFS_PROP_SHAREAFP)
 		return (clp);
 
 	/*

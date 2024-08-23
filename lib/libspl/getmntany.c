@@ -42,115 +42,24 @@
 #include <dirent.h>
 #include <sys/fcntl.h>
 
-#define BUFSIZE (MNT_LINE_MAX + 2)
-
-/*__thread*/ char buf[BUFSIZE];
-
 #define DIFF(xx) ((mrefp->xx != NULL) && \
 		  (mgetp->xx == NULL || strcmp(mrefp->xx, mgetp->xx) != 0))
 
-#if 0 //Replacing with FreeBSD implementation
-int
-getmntany(FILE *fp, struct mnttab *mgetp, struct mnttab *mrefp)
-{
-        struct statfs *sfsp;
-        int nitems;
+static struct statfs *gsfs = NULL;
+static int allfs = 0;
+/*
+ * We will also query the extended filesystem capabilities API, to lookup
+ * other mount options, for example, XATTR. We can not use the MNTNOUSERXATTR
+ * option due to VFS rejecting with EACCESS.
+ */
 
-        nitems = getmntinfo(&sfsp, MNT_WAIT);
+#include <sys/attr.h>
+typedef struct attrlist attrlist_t;
 
-        while (nitems-- > 0) {
-                if (strcmp(mrefp->mnt_fstype, sfsp->f_fstypename) == 0 &&
-                    strcmp(mrefp->mnt_special, sfsp->f_mntfromname) == 0) {
-                        mgetp->mnt_special = sfsp->f_mntfromname;
-                        mgetp->mnt_mountp = sfsp->f_mntonname;
-                        mgetp->mnt_fstype = sfsp->f_fstypename;
-                        mgetp->mnt_mntopts = "";
-                        return (0);
-                }
-                ++sfsp;
-        }
-        return (-1);
-}
-#endif
-
-#if 0 //Replacing with FreeBSD implementation
-char *
-mntopt(char **p)
-{
-        char *cp = *p;
-        char *retstr;
-
-        while (*cp && isspace(*cp))
-                cp++;
-
-        retstr = cp;
-        while (*cp && *cp != ',')
-                cp++;
-
-        if (*cp) {
-                *cp = '\0';
-                cp++;
-        }
-
-        *p = cp;
-        return (retstr);
-}
-#endif
-
-#if 0 //Replacing with FreeBSD implementation
-char *
-hasmntopt(struct mnttab *mnt, char *opt)
-{
-        char tmpopts[MNT_LINE_MAX];
-        char *f, *opts = tmpopts;
-
-        if (mnt->mnt_mntopts == NULL)
-                return (NULL);
-        (void) strcpy(opts, mnt->mnt_mntopts);
-        f = mntopt(&opts);
-        for (; *f; f = mntopt(&opts)) {
-                if (strncmp(opt, f, strlen(opt)) == 0)
-                        return (f - tmpopts + mnt->mnt_mntopts);
-        }
-        return (NULL);
-}
-#endif
-
-
-#if 0 //Replacing with FreeBSD implementation
-int
-getmntent(FILE *fp, struct mnttab *mgetp)
-{
-    static struct statfs *mntbufp = NULL;
-    static unsigned int total   = 0;
-    static unsigned int current = 0;
-
-    if (!mntbufp) {
-
-        total = getmntinfo(&mntbufp, MNT_WAIT);
-        current = 0;
-
-        if (total <= 0) return -1; // EOF
-
-    }
-
-    if (current < total) {
-
-        mgetp->mnt_special = mntbufp[current].f_mntfromname;
-        mgetp->mnt_mountp =  mntbufp[current].f_mntonname;
-        mgetp->mnt_fstype =  mntbufp[current].f_fstypename;
-        mgetp->mnt_mntopts = "";
-
-        current++;
-        return 0; // Valid record
-    }
-
-    // Finished all nodes, return EOF once, and get ready for next time
-    mntbufp = NULL;
-
-    return -1; // EOF
-}
-#endif
+struct attrBufS {
+	u_int32_t       length;
+	vol_capabilities_set_t caps;
+} __attribute__((aligned(4), packed));
 
 
 DIR *
@@ -257,19 +166,19 @@ mntopt(char **p)
 {
 	char *cp = *p;
 	char *retstr;
-    
+
 	while (*cp && isspace(*cp))
 		cp++;
-    
+
 	retstr = cp;
 	while (*cp && *cp != ',')
 		cp++;
-    
+
 	if (*cp) {
 		*cp = '\0';
 		cp++;
 	}
-    
+
 	*p = cp;
 	return (retstr);
 }
@@ -277,12 +186,12 @@ mntopt(char **p)
 char *
 hasmntopt(struct mnttab *mnt, char *opt)
 {
-	char tmpopts[MNT_LINE_MAX];
+	char tmpopts[256];
 	char *f, *opts = tmpopts;
-    
+
 	if (mnt->mnt_mntopts == NULL)
 		return (NULL);
-	(void) strcpy(opts, mnt->mnt_mntopts);
+	(void) strlcpy(opts, mnt->mnt_mntopts, 256);
 	f = mntopt(&opts);
 	for (; *f; f = mntopt(&opts)) {
 		if (strncmp(opt, f, strlen(opt)) == 0)
@@ -294,20 +203,97 @@ hasmntopt(struct mnttab *mnt, char *opt)
 static void
 optadd(char *mntopts, size_t size, const char *opt)
 {
-    
+
 	if (mntopts[0] != '\0')
 		strlcat(mntopts, ",", size);
 	strlcat(mntopts, opt, size);
 }
+
+
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreServices/CoreServices.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/storage/IOMedia.h>
+#include <IOKit/IOBSD.h>
+
+
+char * MYCFStringCopyUTF8String(CFStringRef aString)
+{
+  if (aString == NULL) {
+    return NULL;
+  }
+
+  CFIndex length = CFStringGetLength(aString);
+  CFIndex maxSize =
+  CFStringGetMaximumSizeForEncoding(length,
+                                    kCFStringEncodingUTF8);
+  char *buffer = (char *)malloc(maxSize);
+  if (CFStringGetCString(aString, buffer, maxSize,
+                         kCFStringEncodingUTF8)) {
+    return buffer;
+  }
+  return NULL;
+}
+
+/*
+ * Given "/dev/disk6" connect to IOkit and fetch the dataset
+ * name "BOOM/lower", and use it instead.
+ */
+void expand_disk_to_zfs(char *devname, int len)
+{
+	char *result = NULL;
+	CFMutableDictionaryRef matchingDict;
+	io_service_t service;
+	CFStringRef cfstr;
+	char *device;
+
+	if (strncmp(devname, "/dev/disk", 9) != 0)
+		return;
+
+	device = &devname[5];
+
+	matchingDict = IOBSDNameMatching(kIOMasterPortDefault, 0, device);
+	if (NULL == matchingDict)
+		return;
+
+	/*
+	 * Fetch the object with the matching BSD node name.
+	 * Note that there should only be one match, so
+	 * IOServiceGetMatchingService is used instead of
+	 * IOServiceGetMatchingServices to simplify the code.
+	 */
+	service = IOServiceGetMatchingService(kIOMasterPortDefault,
+										  matchingDict);
+
+	if (IO_OBJECT_NULL == service) {
+		return;
+	}
+
+	cfstr = IORegistryEntryCreateCFProperty(service,
+		CFSTR("ZFS Dataset"), kCFAllocatorDefault, 0);
+	if (cfstr) {
+		result = MYCFStringCopyUTF8String(cfstr);
+		CFRelease(cfstr);
+	}
+
+	IOObjectRelease(service);
+
+	if (result) {
+		strlcpy(devname, result, len);
+		free(result);
+	}
+}
+
+
 
 void
 statfs2mnttab(struct statfs *sfs, struct mnttab *mp)
 {
 	static char mntopts[MNTMAXSTR];
 	long flags;
-    
+
 	mntopts[0] = '\0';
-    
+
 	flags = sfs->f_flags;
 #define	OPTADD(opt)	optadd(mntopts, sizeof(mntopts), (opt))
 	if (flags & MNT_RDONLY)
@@ -315,7 +301,11 @@ statfs2mnttab(struct statfs *sfs, struct mnttab *mp)
 	else
 		OPTADD(MNTOPT_RW);
 	if (flags & MNT_NOSUID)
+#ifdef __FreeBSD__
 		OPTADD(MNTOPT_NOSUID);
+#elif defined(__APPLE__)
+		OPTADD(MNTOPT_NOSETUID);
+#endif
 	else
 		OPTADD(MNTOPT_SETUID);
 	if (flags & MNT_UPDATE)
@@ -324,19 +314,33 @@ statfs2mnttab(struct statfs *sfs, struct mnttab *mp)
 		OPTADD(MNTOPT_NOATIME);
 	else
 		OPTADD(MNTOPT_ATIME);
-#ifdef __FreeBSD__
-	OPTADD(MNTOPT_NOXATTR);
-#endif
-#ifdef __APPLE__
-	if (flags & MNT_NOUSERXATTR)
-		OPTADD(MNTOPT_NOXATTR);
-	else
-		OPTADD(MNTOPT_XATTR);
-#endif
+		{
+			struct attrBufS attrBuf;
+			attrlist_t      attrList;
+
+			memset(&attrList, 0, sizeof(attrList));
+			attrList.bitmapcount = ATTR_BIT_MAP_COUNT;
+			attrList.volattr = ATTR_VOL_INFO|ATTR_VOL_CAPABILITIES;
+
+			if (getattrlist(sfs->f_mntonname, &attrList, &attrBuf,
+							sizeof(attrBuf), 0) == 0)  {
+
+				if (attrBuf.caps[VOL_CAPABILITIES_INTERFACES] &
+					VOL_CAP_INT_EXTENDED_ATTR) {
+					OPTADD(MNTOPT_XATTR);
+				} else {
+					OPTADD(MNTOPT_NOXATTR);
+				} // If EXTENDED
+			} // if getattrlist
+		}
 	if (flags & MNT_NOEXEC)
 		OPTADD(MNTOPT_NOEXEC);
 	else
 		OPTADD(MNTOPT_EXEC);
+	if (flags & MNT_NODEV)
+		OPTADD(MNTOPT_NODEVICES);
+	else
+		OPTADD(MNTOPT_DEVICES);
 	if (flags & MNT_DONTBROWSE)
 		OPTADD(MNTOPT_NOBROWSE);
 	else
@@ -345,36 +349,41 @@ statfs2mnttab(struct statfs *sfs, struct mnttab *mp)
 		OPTADD(MNTOPT_NOOWNERS);
 	else
 		OPTADD(MNTOPT_OWNERS);
+
 #undef	OPTADD
+
+	// If a disk is /dev/diskX, lets see if it has "zfs_dataset_name"
+	// set, and if so, use it instead, for mount matching.
+	expand_disk_to_zfs(sfs->f_mntfromname, sizeof(sfs->f_mntfromname));
+
+
+
 	mp->mnt_special = sfs->f_mntfromname;
 	mp->mnt_mountp = sfs->f_mntonname;
 	mp->mnt_fstype = sfs->f_fstypename;
 	mp->mnt_mntopts = mntopts;
-	//if (strcmp(mp->mnt_fstype, MNTTYPE_ZFS) == 0) 
-		//printf("mnttab: %s %s %s %s\n", mp->mnt_special, mp->mnt_mountp, mp->mnt_fstype, mp->mnt_mntopts);
-}
+	mp->mnt_fssubtype = sfs->f_fssubtype;
 
-static struct statfs *gsfs = NULL;
-static int allfs = 0;
+}
 
 static int
 statfs_init(void)
 {
 	struct statfs *sfs;
 	int error;
-    
+
 	if (gsfs != NULL) {
 		free(gsfs);
 		gsfs = NULL;
 	}
-	allfs = getfsstat(NULL, 0, MNT_WAIT);
+	allfs = getfsstat(NULL, 0, MNT_NOWAIT);
 	if (allfs == -1)
 		goto fail;
 	gsfs = malloc(sizeof(gsfs[0]) * allfs * 2);
 	if (gsfs == NULL)
 		goto fail;
 	allfs = getfsstat(gsfs, (long)(sizeof(gsfs[0]) * allfs * 2),
-                      MNT_WAIT);
+                      MNT_NOWAIT);
 	if (allfs == -1)
 		goto fail;
 	sfs = realloc(gsfs, allfs * sizeof(gsfs[0]));
@@ -393,27 +402,26 @@ fail:
 int
 getmntany(FILE *fd __unused, struct mnttab *mgetp, struct mnttab *mrefp)
 {
-	//struct statfs *sfs; //Not sure what FreeBSD was planning to do with this.
 	int i, error;
-    
+
 	error = statfs_init();
 	if (error != 0)
 		return (error);
-    
+
 	for (i = 0; i < allfs; i++) {
-		if (mrefp->mnt_special != NULL &&
-		    strcmp(mrefp->mnt_special, gsfs[i].f_mntfromname) != 0) {
-			continue;
-		}
-		if (mrefp->mnt_mountp != NULL &&
-		    strcmp(mrefp->mnt_mountp, gsfs[i].f_mntonname) != 0) {
-			continue;
-		}
-		if (mrefp->mnt_fstype != NULL &&
-		    strcmp(mrefp->mnt_fstype, gsfs[i].f_fstypename) != 0) {
-			continue;
-		}
 		statfs2mnttab(&gsfs[i], mgetp);
+		if (mrefp->mnt_special != NULL && mgetp->mnt_special != NULL &&
+		    strcmp(mrefp->mnt_special, mgetp->mnt_special) != 0) {
+			continue;
+		}
+		if (mrefp->mnt_mountp != NULL && mgetp->mnt_mountp != NULL &&
+		    strcmp(mrefp->mnt_mountp, mgetp->mnt_mountp) != 0) {
+			continue;
+		}
+		if (mrefp->mnt_fstype != NULL && mgetp->mnt_fstype != NULL &&
+		    strcmp(mrefp->mnt_fstype, mgetp->mnt_fstype) != 0) {
+			continue;
+		}
 		return (0);
 	}
 	return (-1);
@@ -422,22 +430,25 @@ getmntany(FILE *fd __unused, struct mnttab *mgetp, struct mnttab *mrefp)
 int
 getmntent(FILE *fp, struct mnttab *mp)
 {
-	//struct statfs *sfs; //Not sure what FreeBSD was planning to do with this.
-	int error, nfs;
-    
-	nfs = (int)lseek(fileno(fp), 0, SEEK_CUR);
-	if (nfs == -1)
-		return (errno);
-	/* If nfs is 0, we want to refresh out cache. */
-	if (nfs == 0 || gsfs == NULL) {
+	static int index = -1;
+	int error = 0;
+
+	if (index < 0) {
 		error = statfs_init();
-		if (error != 0)
-			return (error);
 	}
-	if (nfs >= allfs)
-		return (-1);
-	statfs2mnttab(&gsfs[nfs], mp);
-	if (lseek(fileno(fp), 1, SEEK_CUR) == -1)
-		return (errno);
+
+	if (error != 0)
+		return (error);
+
+	index++;
+
+	// If we have finished "reading" the mnttab, reset it to
+	// start from the beginning, and return EOF.
+	if (index >= allfs) {
+		index = -1;
+		return -1;
+	}
+
+	statfs2mnttab(&gsfs[index], mp);
 	return (0);
 }

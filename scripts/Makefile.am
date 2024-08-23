@@ -1,12 +1,13 @@
 SUBDIRS = zpool-config zpios-test zpios-profile
 
-EXTRA_DIST = dkms.mkconf dkms.postinst kmodtool zfs2zol-patch.sed cstyle.pl
+EXTRA_DIST = dkms.mkconf dkms.postbuild kmodtool zfs2zol-patch.sed cstyle.pl
 
 pkgdatadir = $(datadir)/@PACKAGE@
 dist_pkgdata_SCRIPTS = \
 	$(top_builddir)/scripts/common.sh \
 	$(top_srcdir)/scripts/zconfig.sh \
 	$(top_srcdir)/scripts/zfault.sh \
+	$(top_srcdir)/scripts/ziltest.sh \
 	$(top_srcdir)/scripts/zimport.sh \
 	$(top_srcdir)/scripts/zfs.sh \
 	$(top_srcdir)/scripts/zpool-create.sh \

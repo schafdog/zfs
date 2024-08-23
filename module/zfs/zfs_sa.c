@@ -22,8 +22,7 @@
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  */
 
-#include <sys/types.h>
-#include <sys/param.h>
+#include <sys/zfs_context.h>
 #include <sys/vnode.h>
 #include <sys/sa.h>
 #include <sys/zfs_acl.h>
@@ -64,6 +63,10 @@ sa_attr_reg_t zfs_attr_table[ZPL_END+1] = {
 	{"ZPL_SCANSTAMP", 32, SA_UINT8_ARRAY, 0},
 	{"ZPL_DACL_ACES", 0, SA_ACL, 0},
     {"ZPL_DXATTR", 0, SA_UINT8_ARRAY, 0},
+#ifdef __APPLE__
+    {"ZPL_ADDTIME", sizeof (uint64_t) * 2, SA_UINT64_ARRAY, 0},
+    {"ZPL_DOCUMENTID", sizeof (uint64_t), SA_UINT64_ARRAY, 0},
+#endif
 	{NULL, 0, 0, 0}
 };
 
@@ -99,8 +102,7 @@ zfs_sa_symlink(znode_t *zp, char *link, int len, dmu_tx_t *tx)
 	dmu_buf_t *db = sa_get_db(zp->z_sa_hdl);
 
 	if (ZFS_OLD_ZNODE_PHYS_SIZE + len <= dmu_bonus_max()) {
-		VERIFY(dmu_set_bonus(db,
-		    len + ZFS_OLD_ZNODE_PHYS_SIZE, tx) == 0);
+		VERIFY0(dmu_set_bonus(db, len + ZFS_OLD_ZNODE_PHYS_SIZE, tx));
 		if (len) {
 			bcopy(link, (caddr_t)db->db_data +
 			    ZFS_OLD_ZNODE_PHYS_SIZE, len);
@@ -185,6 +187,85 @@ zfs_sa_set_scanstamp(znode_t *zp, xvattr_t *xvap, dmu_tx_t *tx)
 	}
 }
 
+int
+zfs_sa_get_xattr(znode_t *zp)
+{
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	char *obj;
+	int size;
+	int error;
+
+//	ASSERT(RW_LOCK_HELD(&zp->z_xattr_lock));
+	ASSERT(!zp->z_xattr_cached);
+	ASSERT(zp->z_is_sa);
+
+	error = sa_size(zp->z_sa_hdl, SA_ZPL_DXATTR(zfsvfs), &size);
+	if (error) {
+		if (error == ENOENT)
+			return nvlist_alloc(&zp->z_xattr_cached,
+			    NV_UNIQUE_NAME, KM_SLEEP);
+		else
+			return (error);
+	}
+
+	obj = zio_buf_alloc(size);
+
+	error = sa_lookup(zp->z_sa_hdl, SA_ZPL_DXATTR(zfsvfs), obj, size);
+	if (error == 0)
+		error = nvlist_unpack(obj, size, &zp->z_xattr_cached, KM_SLEEP);
+
+	zio_buf_free(obj, size);
+
+	return (error);
+}
+
+int
+zfs_sa_set_xattr(znode_t *zp)
+{
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	dmu_tx_t *tx;
+	char *obj;
+	size_t size;
+	int error;
+
+#ifdef __LINUX__
+	ASSERT(RW_WRITE_HELD(&zp->z_xattr_lock));
+#endif
+	ASSERT(zp->z_xattr_cached);
+	ASSERT(zp->z_is_sa);
+
+	error = nvlist_size(zp->z_xattr_cached, &size, NV_ENCODE_XDR);
+	if (error)
+		goto out;
+
+	obj = zio_buf_alloc(size);
+
+	error = nvlist_pack(zp->z_xattr_cached, &obj, &size,
+	    NV_ENCODE_XDR, KM_SLEEP);
+	if (error)
+		goto out_free;
+
+	tx = dmu_tx_create(zfsvfs->z_os);
+	dmu_tx_hold_sa_create(tx, size);
+	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_TRUE);
+
+	error = dmu_tx_assign(tx, TXG_WAIT);
+	if (error) {
+		dmu_tx_abort(tx);
+	} else {
+		error = sa_update(zp->z_sa_hdl, SA_ZPL_DXATTR(zfsvfs),
+		    obj, size, tx);
+		if (error)
+			dmu_tx_abort(tx);
+		else
+			dmu_tx_commit(tx);
+	}
+out_free:
+	zio_buf_free(obj, size);
+out:
+	return (error);
+}
+
 /*
  * I'm not convinced we should do any of this upgrade.
  * since the SA code can read both old/new znode formats
@@ -199,9 +280,9 @@ zfs_sa_upgrade(sa_handle_t *hdl, dmu_tx_t *tx)
 	dmu_buf_t *db = sa_get_db(hdl);
 	znode_t *zp = sa_get_userdata(hdl);
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	sa_bulk_attr_t bulk[20];
+#define _NUM_BULK 20
+	sa_bulk_attr_t *bulk, *sa_attrs;
 	int count = 0;
-	sa_bulk_attr_t sa_attrs[20] = { { 0 } };
 	zfs_acl_locator_cb_t locate = { 0 };
 	uint64_t uid, gid, mode, rdev, xattr, parent;
 	uint64_t crtime[2], mtime[2], ctime[2];
@@ -235,6 +316,7 @@ zfs_sa_upgrade(sa_handle_t *hdl, dmu_tx_t *tx)
 	}
 
 	/* First do a bulk query of the attributes that aren't cached */
+	bulk = kmem_alloc(sizeof (sa_bulk_attr_t) * _NUM_BULK, KM_SLEEP);
 	SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs), NULL, &mtime, 16);
 	SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CTIME(zfsvfs), NULL, &ctime, 16);
 	SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs), NULL, &crtime, 16);
@@ -247,15 +329,17 @@ zfs_sa_upgrade(sa_handle_t *hdl, dmu_tx_t *tx)
 	SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_ZNODE_ACL(zfsvfs), NULL,
 	    &znode_acl, 88);
 
-	if (sa_bulk_lookup_locked(hdl, bulk, count) != 0)
+	if (sa_bulk_lookup_locked(hdl, bulk, count) != 0) {
+		kmem_free(bulk, sizeof (sa_bulk_attr_t) * _NUM_BULK);
 		goto done;
-
+	}
 
 	/*
 	 * While the order here doesn't matter its best to try and organize
 	 * it is such a way to pick up an already existing layout number
 	 */
 	count = 0;
+	sa_attrs = kmem_zalloc(sizeof (sa_bulk_attr_t) * _NUM_BULK, KM_SLEEP);
 	SA_ADD_BULK_ATTR(sa_attrs, count, SA_ZPL_MODE(zfsvfs), NULL, &mode, 8);
 	SA_ADD_BULK_ATTR(sa_attrs, count, SA_ZPL_SIZE(zfsvfs), NULL,
 	    &zp->z_size, 8);
@@ -312,6 +396,10 @@ zfs_sa_upgrade(sa_handle_t *hdl, dmu_tx_t *tx)
 		    znode_acl.z_acl_extern_obj, tx));
 
 	zp->z_is_sa = B_TRUE;
+	kmem_free(sa_attrs, sizeof (sa_bulk_attr_t) * _NUM_BULK);
+	kmem_free(bulk, sizeof (sa_bulk_attr_t) * _NUM_BULK);
+#undef _NUM_BULK
+
 done:
 	if (drop_lock)
 		mutex_exit(&zp->z_lock);

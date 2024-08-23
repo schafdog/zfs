@@ -3,7 +3,7 @@
 .\" The contents of this file are subject to the terms of the Common Development and Distribution License (the "License").  You may not use this file except in compliance with the License. You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE or http://www.opensolaris.org/os/licensing.
 .\"  See the License for the specific language governing permissions and limitations under the License. When distributing Covered Code, include this CDDL HEADER in each file and include the License file at usr/src/OPENSOLARIS.LICENSE.  If applicable, add the following below this CDDL HEADER, with
 .\" the fields enclosed by brackets "[]" replaced with your own identifying information: Portions Copyright [yyyy] [name of copyright owner]
-.TH zstreamdump 8 "29 Aug 2012" "ZFS pool 28, filesystem 5" "System Administration Commands"
+.TH ZSTREAMDUMP 8 "Sep 21, 2009"
 .SH NAME
 zstreamdump \- filter data in zfs send stream
 .SH SYNOPSIS
@@ -25,7 +25,7 @@ The following options are supported:
 .sp
 .ne 2
 .na
-\fB\fB-C\fR\fR
+\fB-C\fR
 .ad
 .sp .6
 .RS 4n
@@ -35,14 +35,25 @@ Suppress the validation of checksums.
 .sp
 .ne 2
 .na
-\fB\fB-v\fR\fR
+\fB-v\fR
 .ad
 .sp .6
 .RS 4n
 Verbose. Dump all headers, not only begin and end headers.
 .RE
 
+.SH ATTRIBUTES
+.sp
+.ne 2
+.na
+\fB-d\fR
+.ad
+.sp .6
+.RS 4n
+Dump contents of blocks modified. Implies verbose.
+.RE
+
 .SH SEE ALSO
 .sp
 .LP
-\fBzfs\fR(8)
+\fBzfs\fR(8), \fBattributes\fR(5)

@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
  */
 
 #include <sys/dmu.h>
@@ -57,7 +57,11 @@ write_record(struct diffarg *da)
 		return (0);
 	}
 
+#ifdef _KERNEL
+	da->da_err = spl_vn_rdwr(UIO_WRITE, da->da_vp, (caddr_t)&da->da_ddr,
+#else
 	da->da_err = vn_rdwr(UIO_WRITE, da->da_vp, (caddr_t)&da->da_ddr,
+#endif
 	    sizeof (da->da_ddr), 0, UIO_SYSSPACE, FAPPEND,
 	    RLIM64_INFINITY, CRED(), &resid);
 	*da->da_offp += sizeof (da->da_ddr);
@@ -107,7 +111,7 @@ report_dnode(struct diffarg *da, uint64_t object, dnode_phys_t *dnp)
 /* ARGSUSED */
 static int
 diff_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
-    const zbookmark_t *zb, const dnode_phys_t *dnp, void *arg)
+    const zbookmark_phys_t *zb, const dnode_phys_t *dnp, void *arg)
 {
 	struct diffarg *da = arg;
 	int err = 0;
@@ -115,10 +119,10 @@ diff_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 	if (issig(JUSTLOOKING) && issig(FORREAL))
 		return (SET_ERROR(EINTR));
 
-	if (zb->zb_object != DMU_META_DNODE_OBJECT)
+	if (bp == NULL || zb->zb_object != DMU_META_DNODE_OBJECT)
 		return (0);
 
-	if (bp == NULL) {
+	if (BP_IS_HOLE(bp)) {
 		uint64_t span = DBP_SPAN(dnp, zb->zb_level);
 		uint64_t dnobj = (zb->zb_blkid * span) >> DNODE_SHIFT;
 
@@ -129,13 +133,16 @@ diff_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 	} else if (zb->zb_level == 0) {
 		dnode_phys_t *blk;
 		arc_buf_t *abuf;
-		uint32_t aflags = ARC_WAIT;
+		arc_flags_t aflags = ARC_FLAG_WAIT;
 		int blksz = BP_GET_LSIZE(bp);
+		int zio_flags = ZIO_FLAG_CANFAIL;
 		int i;
 
+		if (BP_IS_PROTECTED(bp))
+			zio_flags |= ZIO_FLAG_RAW;
+
 		if (arc_read(NULL, spa, bp, arc_getbuf_func, &abuf,
-		    ZIO_PRIORITY_ASYNC_READ, ZIO_FLAG_CANFAIL,
-		    &aflags, zb) != 0)
+		    ZIO_PRIORITY_ASYNC_READ, zio_flags, &aflags, zb) != 0)
 			return (SET_ERROR(EIO));
 
 		blk = abuf->b_data;
@@ -146,7 +153,7 @@ diff_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 			if (err)
 				break;
 		}
-		(void) arc_buf_remove_ref(abuf, &abuf);
+		arc_buf_destroy(abuf, &abuf);
 		if (err)
 			return (err);
 		/* Don't care about the data blocks */
@@ -187,14 +194,14 @@ dmu_diff(const char *tosnap_name, const char *fromsnap_name,
 		return (error);
 	}
 
-	if (!dsl_dataset_is_before(tosnap, fromsnap)) {
+	if (!dsl_dataset_is_before(tosnap, fromsnap, 0)) {
 		dsl_dataset_rele(fromsnap, FTAG);
 		dsl_dataset_rele(tosnap, FTAG);
 		dsl_pool_rele(dp, FTAG);
 		return (SET_ERROR(EXDEV));
 	}
 
-	fromtxg = fromsnap->ds_phys->ds_creation_txg;
+	fromtxg = dsl_dataset_phys(fromsnap)->ds_creation_txg;
 	dsl_dataset_rele(fromsnap, FTAG);
 
 	dsl_dataset_long_hold(tosnap, FTAG);
@@ -206,8 +213,17 @@ dmu_diff(const char *tosnap_name, const char *fromsnap_name,
 	da.da_ddr.ddr_first = da.da_ddr.ddr_last = 0;
 	da.da_err = 0;
 
+	/*
+	 * Since zfs diff only looks at dnodes which are stored in plaintext
+	 * (other than bonus buffers), we don't technically need to decrypt
+	 * the dataset to perform this operation. However, the command line
+	 * utility will still fail if the keys are not loaded because the
+	 * dataset isn't mounted and because it will fail when it attempts to
+	 * call the ZFS_IOC_OBJ_TO_STATS ioctl.
+	 */
 	error = traverse_dataset(tosnap, fromtxg,
-	    TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA, diff_cb, &da);
+	    TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA | TRAVERSE_NO_DECRYPT,
+	    diff_cb, &da);
 
 	if (error != 0) {
 		da.da_err = error;
